@@ -8,12 +8,8 @@ class BaseLLMObsIntegration {
     this._tagger = new LLMObsTagger(config)
   }
 
-  setSpanStartTags () {
-    throw new Error('setSpanStartTags must be implemented by the LLMObs subclass')
-  }
-
-  setSpanEndTags () {
-    throw new Error('setSpanEndTags must be implemented by the LLMObs subclass')
+  setLLMObsTags (ctx) {
+    throw new Error('setLLMObsTags must be implemented by the LLMObs subclass')
   }
 }
 

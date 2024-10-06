@@ -9,8 +9,6 @@ const Sampler = require('../../dd-trace/src/sampler')
 const { MEASURED } = require('../../../ext/tags')
 const { estimateTokens } = require('./token-estimator')
 
-const { llmobsSpanStartCh, llmobsSpanEndCh } = require('../../dd-trace/src/llmobs/integrations/channels')
-
 // String#replaceAll unavailable on Node.js@v14 (dd-trace@<=v3)
 const RE_NEWLINE = /\n/g
 const RE_TAB = /\t/g
@@ -195,21 +193,6 @@ class OpenApiPlugin extends TracingPlugin {
 
     span.addTags(tags)
 
-    // equivalent of checking if LLMObs is enabled
-    if (llmobsSpanStartCh.hasSubscribers) {
-      llmobsSpanStartCh.publish({
-        span,
-        integration: 'openai',
-        resource: methodName,
-        inputs: payload,
-        metadata: {
-          apiKey,
-          basePath
-        },
-        parent: store.llmobsSpan
-      })
-    }
-
     ctx.currentStore = { ...store, span, openai: openaiStore }
 
     return ctx.currentStore
@@ -269,16 +252,6 @@ class OpenApiPlugin extends TracingPlugin {
 
     responseDataExtractionByMethod(methodName, tags, body, openaiStore)
     span.addTags(tags)
-
-    if (llmobsSpanEndCh.hasSubscribers) {
-      llmobsSpanEndCh.publish({
-        span,
-        integration: 'openai',
-        resource: methodName,
-        response: body,
-        error
-      })
-    }
 
     span.finish()
     this.sendLog(methodName, span, tags, openaiStore, error)

@@ -4,21 +4,17 @@ const OpenAIIntegration = require('./openai')
 
 const plugins = {}
 
-// TODO(sam.brenner) should we be using the tracer here instead of passing the span?
-function handleSpanStart ({ span, integration, resource, inputs, parent }) {
+function handleLLMObsSpan (integration, ctx) {
   const plugin = plugins[integration]
-  if (plugin) plugin.setSpanStartTags(span, parent, resource, inputs)
+  if (plugin) plugin.setLLMObsTags(ctx)
 }
-
-function handleSpanEnd ({ span, integration, resource, response, error }) {
-  const plugin = plugins[integration]
-  if (plugin) plugin.setSpanEndTags(span, resource, response, error)
-}
-
-function handleSpanError ({ span, integration, resource, error }) {}
 
 function registerPlugins (config) {
+  // TODO: maybe let LLMObs plugins be configurable
   plugins.openai = new OpenAIIntegration(config)
 }
 
-module.exports = { handleSpanStart, handleSpanEnd, handleSpanError, registerPlugins }
+module.exports = {
+  handleLLMObsSpan,
+  registerPlugins
+}

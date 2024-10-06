@@ -2,7 +2,6 @@
 
 const BaseLLMObsIntegration = require('./base')
 
-const { getMlApp, getSessionId } = require('../util')
 const {
   MODEL_NAME,
   INPUT_TOKENS_METRIC_KEY,
@@ -10,14 +9,25 @@ const {
   TOTAL_TOKENS_METRIC_KEY
 } = require('../constants')
 
-class OpenAIIntegration extends BaseLLMObsIntegration {
-  get name () {
-    return 'openai'
-  }
+const logger = require('../../log')
 
-  setSpanStartTags (span, parent, resource, inputs) {
+class OpenAIIntegration extends BaseLLMObsIntegration {
+  setLLMObsTags (ctx) {
+    // methodName, args, and result are set by the APM OpenAI integration
+    const span = ctx.currentStore?.span
+    if (!span) {
+      logger.warn('Tried to start an LLMObs OpenAI span without an active APM span. Not starting LLMObs span.')
+      return
+    }
+
+    const resource = ctx.methodName
     const methodName = this._gateResource(this._normalizeOpenAIResourceName(resource))
     if (!methodName) return // we will not trace all openai methods for llmobs
+
+    const parent = ctx.currentStore?.llmobsSpan
+    const inputs = ctx.args[0] // completion, chat completion, and embeddings take one argument
+    const response = ctx.result?.data // no result if error
+    const error = !!span.context()._tags.error
 
     const name = `openai.${methodName}`
 
@@ -26,33 +36,15 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
 
     this._tagger.setLLMObsSpanTags(span, kind, {
       modelProvider: 'openai',
-      mlApp: getMlApp(span, this._config.llmobs.mlApp),
-      sessionId: getSessionId(span),
       parentLLMObsSpan: parent
     }, name)
 
     if (operation === 'completion') {
-      this._tagCompletionStart(span, inputs)
+      this._tagCompletion(span, inputs, response, error)
     } else if (operation === 'chat') {
-      this._tagChatCompletionStart(span, inputs)
+      this._tagChatCompletion(span, inputs, response, error)
     } else if (operation === 'embedding') {
-      this._tagEmbeddingStart(span, inputs)
-    }
-  }
-
-  // this should not care about if the response was streamed or not
-  setSpanEndTags (span, resource, response, error) {
-    const methodName = this._gateResource(this._normalizeOpenAIResourceName(resource))
-    if (!methodName) return // we will not trace all openai methods for llmobs
-
-    const operation = this._getOperation(methodName)
-
-    if (operation === 'completion') {
-      this._tagCompletionEnd(span, response, error)
-    } else if (operation === 'chat') {
-      this._tagChatCompletionEnd(span, response, error)
-    } else if (operation === 'embedding') {
-      this._tagEmbeddingEnd(span, response, error)
+      this._tagEmbedding(span, inputs, response, error)
     }
 
     if (!error) {
@@ -65,7 +57,7 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
     }
   }
 
-  _tagEmbeddingStart (span, inputs) {
+  _tagEmbedding (span, inputs, response, error) {
     const { model, ...parameters } = inputs
     if (model) span.setTag(MODEL_NAME, model)
 
@@ -77,45 +69,44 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
 
     let embeddingInputs = inputs.input
     if (!Array.isArray(embeddingInputs)) embeddingInputs = [embeddingInputs]
-    this._tagger.tagEmbeddingIO(span, embeddingInputs.map(input => ({ text: input })), undefined)
-  }
+    const embeddingInput = embeddingInputs.map(input => ({ text: input }))
 
-  _tagEmbeddingEnd (span, response, error) {
-    if (!error) {
-      const float = Array.isArray(response.data[0].embedding)
-      if (float) {
-        const embeddingDim = response.data[0].embedding.length
-        this._tagger.tagEmbeddingIO(
-          span, undefined, `[${response.data.length} embedding(s) returned with size ${embeddingDim}]`
-        )
-        return
-      }
-
-      this._tagger.tagEmbeddingIO(span, undefined, `[${response.data.length} embedding(s) returned]`)
+    if (error) {
+      this._tagger.tagEmbeddingIO(span, embeddingInput, undefined)
+      return
     }
+
+    const float = Array.isArray(response.data[0].embedding)
+    let embeddingOutput
+    if (float) {
+      const embeddingDim = response.data[0].embedding.length
+      embeddingOutput = `[${response.data.length} embedding(s) returned with size ${embeddingDim}]`
+    } else {
+      embeddingOutput = `[${response.data.length} embedding(s) returned]`
+    }
+
+    this._tagger.tagEmbeddingIO(span, embeddingInput, embeddingOutput)
   }
 
-  _tagCompletionStart (span, inputs) {
+  _tagCompletion (span, inputs, response, error) {
     let { prompt, model, ...parameters } = inputs
     if (!Array.isArray(prompt)) prompt = [prompt]
     if (model) span.setTag(MODEL_NAME, model)
 
-    this._tagger.tagLLMIO(span, prompt.map(p => ({ content: p })), undefined)
+    const completionInput = prompt.map(p => ({ content: p }))
+
+    const completionOutput = error ? [{ content: '' }] : response.choices.map(choice => ({ content: choice.text }))
+
+    this._tagger.tagLLMIO(span, completionInput, completionOutput)
     this._tagger.tagMetadata(span, parameters)
   }
 
-  _tagCompletionEnd (span, response, error) {
-    if (error) {
-      this._tagger.tagLLMIO(span, undefined, [{ content: '' }])
-      return
-    }
+  _tagChatCompletion (span, inputs, response, error) {
+    const { messages, model, ...parameters } = inputs
+    if (model) span.setTag(MODEL_NAME, model)
 
-    this._tagger.tagLLMIO(span, undefined, response.choices.map(choice => ({ content: choice.text })))
-  }
-
-  _tagChatCompletionEnd (span, response, error) {
     if (error) {
-      this._tagger.tagLLMIO(span, undefined, [{ content: '' }])
+      this._tagger.tagLLMIO(span, messages, [{ content: '' }])
       return
     }
 
@@ -149,13 +140,7 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
       }
     }
 
-    this._tagger.tagLLMIO(span, undefined, outputMessages)
-  }
-
-  _tagChatCompletionStart (span, inputs) {
-    const { messages, model, ...parameters } = inputs
-    this._tagger.tagLLMIO(span, messages, undefined) // no output data
-    if (model) span.setTag(MODEL_NAME, model)
+    this._tagger.tagLLMIO(span, messages, outputMessages)
 
     const metadata = Object.entries(parameters).reduce((obj, [key, value]) => {
       if (!['tools', 'functions'].includes(key)) {
@@ -206,6 +191,7 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
       case 'createEmbedding':
         return 'embedding'
       default:
+        // should never happen
         return 'unknown'
     }
   }

@@ -4,13 +4,9 @@ const proxyquire = require('proxyquire')
 
 describe('module', () => {
   let llmobsModule
-  let llmobsSpanStartCh
-  let llmobsSpanEndCh
-  let llmobsSpanErrorCh
+  let openai
   let injectCh
-  let handleSpanStart
-  let handleSpanEnd
-  let handleSpanError
+  let handleLLMObsSpan
   let registerPlugins
   let logger
 
@@ -39,14 +35,10 @@ describe('module', () => {
   }
 
   beforeEach(() => {
-    llmobsSpanStartCh = createStubChannel()
-    llmobsSpanEndCh = createStubChannel()
-    llmobsSpanErrorCh = createStubChannel()
+    openai = createStubChannel()
     injectCh = createStubChannel()
 
-    handleSpanStart = sinon.stub()
-    handleSpanEnd = sinon.stub()
-    handleSpanError = sinon.stub()
+    handleLLMObsSpan = sinon.stub()
     registerPlugins = sinon.stub()
 
     logger = {
@@ -56,15 +48,11 @@ describe('module', () => {
     store = {}
     llmobsModule = proxyquire('../../src/llmobs', {
       './integrations/channels': {
-        llmobsSpanStartCh,
-        llmobsSpanEndCh,
-        llmobsSpanErrorCh,
+        openai,
         injectCh
       },
       './integrations': {
-        handleSpanStart,
-        handleSpanEnd,
-        handleSpanError,
+        handleLLMObsSpan,
         registerPlugins
       },
       '../log': logger,
@@ -88,18 +76,14 @@ describe('module', () => {
     llmobsModule.enable(config)
 
     expect(registerPlugins).to.have.been.calledWith(config)
-    expect(llmobsSpanStartCh.subscribe).to.have.been.calledWith(handleSpanStart)
-    expect(llmobsSpanEndCh.subscribe).to.have.been.calledWith(handleSpanEnd)
-    expect(llmobsSpanErrorCh.subscribe).to.have.been.calledWith(handleSpanError)
+    expect(openai.subscribe).to.have.been.called
     expect(injectCh.subscribe).to.have.been.calledWith(handleLLMObsParentIdInjection)
   })
 
   it('disables without active subscribers', () => {
     llmobsModule.disable()
 
-    expect(llmobsSpanStartCh.unsubscribe).to.not.have.been.called
-    expect(llmobsSpanEndCh.unsubscribe).to.not.have.been.called
-    expect(llmobsSpanErrorCh.unsubscribe).to.not.have.been.called
+    expect(openai.unsubscribe).to.not.have.been.called
     expect(injectCh.unsubscribe).to.not.have.been.called
   })
 
@@ -107,9 +91,7 @@ describe('module', () => {
     llmobsModule.enable({})
     llmobsModule.disable()
 
-    expect(llmobsSpanStartCh.unsubscribe).to.have.been.calledWith(handleSpanStart)
-    expect(llmobsSpanEndCh.unsubscribe).to.have.been.calledWith(handleSpanEnd)
-    expect(llmobsSpanErrorCh.unsubscribe).to.have.been.calledWith(handleSpanError)
+    expect(openai.unsubscribe).to.have.been.called
     expect(injectCh.unsubscribe).to.have.been.calledWith(handleLLMObsParentIdInjection)
   })
 

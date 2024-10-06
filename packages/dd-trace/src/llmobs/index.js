@@ -1,31 +1,23 @@
 'use strict'
 
-const { handleSpanStart, handleSpanEnd, handleSpanError, registerPlugins } = require('./integrations')
-const {
-  llmobsSpanStartCh,
-  llmobsSpanEndCh,
-  llmobsSpanErrorCh,
-  injectCh
-} = require('./integrations/channels')
+const { handleLLMObsSpan, registerPlugins } = require('./integrations')
+const { injectCh, openai } = require('./integrations/channels')
 
 const log = require('../log')
 const { PROPAGATED_PARENT_ID_KEY } = require('./constants')
 const { storage } = require('../../../datadog-core')
 
+// TODO make this more generic once we have more integrations
+const openaiHandler = ctx => handleLLMObsSpan('openai', ctx)
+
 function enable (config) {
   registerPlugins(config)
-  llmobsSpanStartCh.subscribe(handleSpanStart)
-  llmobsSpanEndCh.subscribe(handleSpanEnd)
-  llmobsSpanErrorCh.subscribe(handleSpanError)
-
-  injectCh.subscribe(handleLLMObsParentIdInjection)
+  openai.subscribe(openaiHandler) // openai integration
+  injectCh.subscribe(handleLLMObsParentIdInjection) // inject LLMObs info for distributed tracing
 }
 
 function disable () {
-  if (llmobsSpanStartCh.hasSubscribers) llmobsSpanStartCh.unsubscribe(handleSpanStart)
-  if (llmobsSpanEndCh.hasSubscribers) llmobsSpanEndCh.unsubscribe(handleSpanEnd)
-  if (llmobsSpanErrorCh.hasSubscribers) llmobsSpanErrorCh.unsubscribe(handleSpanError)
-
+  if (openai.hasSubscribers) openai.unsubscribe(openaiHandler)
   if (injectCh.hasSubscribers) injectCh.unsubscribe(handleLLMObsParentIdInjection)
 }
 
