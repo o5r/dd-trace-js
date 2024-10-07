@@ -92,7 +92,11 @@ function expectedLLMObsBaseEvent ({
     duration: fromBuffer(span.duration, true),
     status: error ? 'error' : 'ok',
     meta: { 'span.kind': spanKind },
-    metrics: {}
+    metrics: {},
+    _dd: {
+      trace_id: MOCK_STRING,
+      span_id: fromBuffer(span.span_id)
+    }
   }
 
   if (sessionId) spanEvent.session_id = sessionId

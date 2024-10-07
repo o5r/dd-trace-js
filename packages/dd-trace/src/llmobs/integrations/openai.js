@@ -3,7 +3,6 @@
 const BaseLLMObsIntegration = require('./base')
 
 const {
-  MODEL_NAME,
   INPUT_TOKENS_METRIC_KEY,
   OUTPUT_TOKENS_METRIC_KEY,
   TOTAL_TOKENS_METRIC_KEY
@@ -36,7 +35,8 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
 
     this._tagger.setLLMObsSpanTags(span, kind, {
       modelProvider: 'openai',
-      parentLLMObsSpan: parent
+      parentLLMObsSpan: parent,
+      modelName: inputs.model
     }, name)
 
     if (operation === 'completion') {
@@ -48,18 +48,16 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
     }
 
     if (!error) {
-      const tags = span.context()._tags
       this._tagger.tagMetrics(span, {
-        [INPUT_TOKENS_METRIC_KEY]: tags['openai.response.usage.prompt_tokens'],
-        [OUTPUT_TOKENS_METRIC_KEY]: tags['openai.response.usage.completion_tokens'],
-        [TOTAL_TOKENS_METRIC_KEY]: tags['openai.response.usage.total_tokens']
+        [INPUT_TOKENS_METRIC_KEY]: response.usage?.prompt_tokens,
+        [OUTPUT_TOKENS_METRIC_KEY]: response.usage?.completion_tokens,
+        [TOTAL_TOKENS_METRIC_KEY]: response.usage?.total_tokens
       })
     }
   }
 
   _tagEmbedding (span, inputs, response, error) {
     const { model, ...parameters } = inputs
-    if (model) span.setTag(MODEL_NAME, model)
 
     const metadata = {
       encoding_format: parameters.encoding_format || 'float'
@@ -91,7 +89,6 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
   _tagCompletion (span, inputs, response, error) {
     let { prompt, model, ...parameters } = inputs
     if (!Array.isArray(prompt)) prompt = [prompt]
-    if (model) span.setTag(MODEL_NAME, model)
 
     const completionInput = prompt.map(p => ({ content: p }))
 
@@ -103,7 +100,6 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
 
   _tagChatCompletion (span, inputs, response, error) {
     const { messages, model, ...parameters } = inputs
-    if (model) span.setTag(MODEL_NAME, model)
 
     if (error) {
       this._tagger.tagLLMIO(span, messages, [{ content: '' }])
@@ -122,19 +118,19 @@ class OpenAIIntegration extends BaseLLMObsIntegration {
           name: message.function_call.name,
           arguments: JSON.parse(message.function_call.arguments)
         }
-        outputMessages.push({ content, role, tool_calls: [functionCallInfo] })
+        outputMessages.push({ content, role, toolCalls: [functionCallInfo] })
       } else if (message.tool_calls) {
         const toolCallsInfo = []
         for (const toolCall of message.tool_calls) {
           const toolCallInfo = {
             arguments: JSON.parse(toolCall.function.arguments),
             name: toolCall.function.name,
-            tool_id: toolCall.id,
+            toolId: toolCall.id,
             type: toolCall.type
           }
           toolCallsInfo.push(toolCallInfo)
         }
-        outputMessages.push({ content, role, tool_calls: toolCallsInfo })
+        outputMessages.push({ content, role, toolCalls: toolCallsInfo })
       } else {
         outputMessages.push({ content, role })
       }

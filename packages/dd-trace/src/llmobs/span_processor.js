@@ -16,7 +16,8 @@ const {
   TAGS,
   PARENT_ID_KEY,
   SESSION_ID,
-  NAME
+  NAME,
+  UNSERIALIZABLE_VALUE_TEXT
 } = require('./constants')
 
 const {
@@ -25,11 +26,12 @@ const {
   ERROR_STACK
 } = require('../constants')
 
+const LLMObsTagger = require('./tagger')
 const AgentlessWriter = require('./writers/spans/agentless')
 const AgentProxyWriter = require('./writers/spans/agentProxy')
-const { isLLMSpan } = require('./util')
 
 const tracerVersion = require('../../../../package.json').version
+const logger = require('../log')
 
 class LLMObsSpanProcessor {
   constructor (config) {
@@ -42,65 +44,82 @@ class LLMObsSpanProcessor {
     }
   }
 
-  process (span) {
+  // TODO: can we correlate the span + trace IDs with a namespaced object to
+  // access LLMObs properties associated with the span?
+  process ({ span }) {
     if (!this._config.llmobs.enabled) return
-    if (!isLLMSpan(span)) return
-    const payload = this._process(span)
+    // if the span is not in our private tagger map, it is not an llmobs span
+    if (!LLMObsTagger.tagMap.has(span)) return
+    const formattedEvent = this.format(span)
 
-    this._writer.append(payload)
+    try {
+      this._writer.append(formattedEvent)
+    } catch (e) {
+      // this should be a rare case
+      // we protect against unserializable properties in the format function, and in
+      // safeguards in the tagger
+      logger.warn(`
+        Failed to append span to LLM Observability writer, likely due to an unserializable property.
+        Span won't be sent to LLM Observability: ${e.message}
+      `)
+    }
   }
 
-  _process (span) {
-    const tags = span.context()._tags
-    const spanKind = tags[SPAN_KIND]
+  // TODO: pass in span plus correlated LLMObs object from namespaced storage
+  // Then, the only thing we need the span for are error tags and start/duration
+  format (span) {
+    const spanTags = span.context()._tags
+    const mlObsTags = LLMObsTagger.tagMap.get(span)
+
+    const spanKind = mlObsTags[SPAN_KIND]
 
     const meta = { 'span.kind': spanKind, input: {}, output: {} }
     const input = {}
     const output = {}
 
-    if (['llm', 'embedding'].includes(spanKind) && tags[MODEL_NAME]) {
-      meta.model_name = tags[MODEL_NAME]
-      meta.model_provider = (tags[MODEL_PROVIDER] || 'custom').toLowerCase()
+    if (['llm', 'embedding'].includes(spanKind) && mlObsTags[MODEL_NAME]) {
+      meta.model_name = mlObsTags[MODEL_NAME]
+      meta.model_provider = (mlObsTags[MODEL_PROVIDER] || 'custom').toLowerCase()
     }
-    if (tags[METADATA]) {
-      meta.metadata = JSON.parse(tags[METADATA])
+    if (mlObsTags[METADATA]) {
+      this._addObject(mlObsTags[METADATA], meta.metadata = {})
     }
-    if (spanKind === 'llm' && tags[INPUT_MESSAGES]) {
-      input.messages = JSON.parse(tags[INPUT_MESSAGES])
+    if (spanKind === 'llm' && mlObsTags[INPUT_MESSAGES]) {
+      input.messages = mlObsTags[INPUT_MESSAGES]
     }
-    if (tags[INPUT_VALUE]) {
-      input.value = tags[INPUT_VALUE]
+    if (mlObsTags[INPUT_VALUE]) {
+      input.value = mlObsTags[INPUT_VALUE]
     }
-    if (spanKind === 'llm' && tags[OUTPUT_MESSAGES]) {
-      output.messages = JSON.parse(tags[OUTPUT_MESSAGES])
+    if (spanKind === 'llm' && mlObsTags[OUTPUT_MESSAGES]) {
+      output.messages = mlObsTags[OUTPUT_MESSAGES]
     }
-    if (spanKind === 'embedding' && tags[INPUT_DOCUMENTS]) {
-      input.documents = JSON.parse(tags[INPUT_DOCUMENTS])
+    if (spanKind === 'embedding' && mlObsTags[INPUT_DOCUMENTS]) {
+      input.documents = mlObsTags[INPUT_DOCUMENTS]
     }
-    if (tags[OUTPUT_VALUE]) {
-      output.value = tags[OUTPUT_VALUE]
+    if (mlObsTags[OUTPUT_VALUE]) {
+      output.value = mlObsTags[OUTPUT_VALUE]
     }
-    if (spanKind === 'retrieval' && tags[OUTPUT_DOCUMENTS]) {
-      output.documents = JSON.parse(tags[OUTPUT_DOCUMENTS])
+    if (spanKind === 'retrieval' && mlObsTags[OUTPUT_DOCUMENTS]) {
+      output.documents = mlObsTags[OUTPUT_DOCUMENTS]
     }
 
-    const error = tags.error
+    const error = spanTags.error
     if (error) {
-      meta[ERROR_MESSAGE] = tags[ERROR_MESSAGE] || error.message || error.code
-      meta[ERROR_TYPE] = tags[ERROR_TYPE] || error.name
-      meta[ERROR_STACK] = tags[ERROR_STACK] || error.stack
+      meta[ERROR_MESSAGE] = spanTags[ERROR_MESSAGE] || error.message || error.code
+      meta[ERROR_TYPE] = spanTags[ERROR_TYPE] || error.name
+      meta[ERROR_STACK] = spanTags[ERROR_STACK] || error.stack
     }
 
     if (input) meta.input = input
     if (output) meta.output = output
 
-    const metrics = JSON.parse(tags[METRICS] || '{}')
+    const metrics = mlObsTags[METRICS] || {}
 
-    const mlApp = tags[ML_APP]
-    const sessionId = tags[SESSION_ID]
-    const parentId = tags[PARENT_ID_KEY]
+    const mlApp = mlObsTags[ML_APP]
+    const sessionId = mlObsTags[SESSION_ID]
+    const parentId = mlObsTags[PARENT_ID_KEY]
 
-    const name = tags[NAME] || span._name
+    const name = mlObsTags[NAME] || span._name
 
     const llmObsSpanEvent = {
       trace_id: span.context().toTraceId(true),
@@ -110,14 +129,54 @@ class LLMObsSpanProcessor {
       tags: this._processTags(span, mlApp, sessionId, error),
       start_ns: Math.round(span._startTime * 1e6),
       duration: Math.round(span._duration * 1e6),
-      status: tags.error ? 'error' : 'ok',
+      status: spanTags.error ? 'error' : 'ok',
       meta,
-      metrics
+      metrics,
+      _dd: {
+        span_id: span.context().toSpanId(),
+        trace_id: span.context().toTraceId(true)
+      }
     }
 
     if (sessionId) llmObsSpanEvent.session_id = sessionId
 
     return llmObsSpanEvent
+  }
+
+  // For now, this only applies to metadata, as we let users annotate this field with any object
+  // However, we want to protect against circular references or BigInts (unserializable)
+  // This function can be reused for other fields if needed
+  // Messages, Documents, and Metrics are safeguarded in `llmobs/tagger.js`
+  _addObject (obj, carrier) {
+    const seenObjects = new WeakSet()
+    seenObjects.add(obj) // capture root object
+
+    const isCircular = value => {
+      if (typeof value !== 'object') return false
+      if (seenObjects.has(value)) return true
+      seenObjects.add(value)
+      return false
+    }
+
+    const add = (obj, carrier) => {
+      for (const key in obj) {
+        const value = obj[key]
+        if (!Object.prototype.hasOwnProperty.call(obj, key)) continue
+        if (typeof value === 'bigint' || isCircular(value)) {
+          // mark as unserializable instead of dropping
+          logger.warn(`Unserializable property found in metadata: ${key}`)
+          carrier[key] = UNSERIALIZABLE_VALUE_TEXT
+          continue
+        }
+        if (typeof value === 'object') {
+          add(value, carrier[key] = {})
+        } else {
+          carrier[key] = value
+        }
+      }
+    }
+
+    add(obj, carrier)
   }
 
   _processTags (span, mlApp, sessionId, error) {
@@ -134,7 +193,7 @@ class LLMObsSpanProcessor {
     const errType = span.context()._tags[ERROR_TYPE] || error?.name
     if (errType) tags.error_type = errType
     if (sessionId) tags.session_id = sessionId
-    const existingTags = JSON.parse(span.context()._tags[TAGS] || '{}')
+    const existingTags = LLMObsTagger.tagMap.get(span)?.[TAGS] || {}
     if (existingTags) tags = { ...tags, ...existingTags }
     return Object.entries(tags).map(([key, value]) => `${key}:${value ?? ''}`)
   }

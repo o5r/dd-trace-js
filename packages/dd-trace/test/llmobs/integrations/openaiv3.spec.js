@@ -32,7 +32,7 @@ describe('integrations', () => {
         }
       })
 
-      sinon.stub(tracer._tracer._processor._llmobs._writer, 'append')
+      sinon.stub(tracer.llmobs._processor._writer, 'append')
 
       // reduce errors related to too many listeners
       process.removeAllListeners('beforeExit')
@@ -41,13 +41,13 @@ describe('integrations', () => {
       sinon.stub(NoopExternalLogger.prototype, 'log')
       sinon.stub(Sampler.prototype, 'isSampled').returns(true)
 
-      llmobsWriter = tracer._tracer._processor._llmobs._writer
+      llmobsWriter = tracer.llmobs._processor._writer
       llmobsWriter.append.reset()
     })
 
     afterEach(() => {
       nock.cleanAll()
-      tracer._tracer._processor._llmobs._writer.append.reset()
+      tracer.llmobs._processor._writer.append.reset()
     })
 
     after(() => {

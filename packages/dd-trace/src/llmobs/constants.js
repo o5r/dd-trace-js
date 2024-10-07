@@ -39,5 +39,6 @@ module.exports = {
 
   DROPPED_IO_COLLECTION_ERROR: 'dropped_io',
   DROPPED_VALUE_TEXT: "[This value has been dropped because this span's size exceeds the 1MB size limit.]",
-  ROOT_PARENT_ID: 'undefined'
+  ROOT_PARENT_ID: 'undefined',
+  UNSERIALIZABLE_VALUE_TEXT: 'Unserializable value'
 }
