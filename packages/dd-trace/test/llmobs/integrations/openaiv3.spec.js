@@ -6,7 +6,7 @@ const { DogStatsDClient } = require('../../../src/dogstatsd')
 const { NoopExternalLogger } = require('../../../src/external-logger/src')
 
 const nock = require('nock')
-const { expectedLLMObsLLMSpanEvent, deepEqualWithMockValues } = require('./util')
+const { expectedLLMObsLLMSpanEvent, deepEqualWithMockValues } = require('../util')
 const chai = require('chai')
 const semver = require('semver')
 

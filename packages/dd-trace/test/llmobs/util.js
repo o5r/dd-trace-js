@@ -2,7 +2,7 @@
 
 const chai = require('chai')
 
-const tracerVersion = require('../../../../../package.json').version
+const tracerVersion = require('../../../../package.json').version
 
 const MOCK_STRING = Symbol('string')
 const MOCK_NUMBER = Symbol('number')
