@@ -68,6 +68,37 @@ function expectedLLMObsLLMSpanEvent (options) {
   return spanEvent
 }
 
+function expectedLLMObsNonLLMSpanEvent (options) {
+  const spanEvent = expectedLLMObsBaseEvent(options)
+  const {
+    spanKind,
+    inputValue,
+    outputValue,
+    outputDocuments,
+    metadata,
+    tokenMetrics
+  } = options
+
+  const meta = { input: {}, output: {} }
+  if (spanKind === 'retrieval') {
+    if (inputValue) meta.input.value = inputValue
+    if (outputDocuments) meta.output.documents = outputDocuments
+    if (outputValue) meta.output.value = outputValue
+  }
+  if (inputValue) meta.input.value = inputValue
+  if (metadata) meta.metadata = metadata
+  if (outputValue) meta.output.value = outputValue
+
+  if (!spanEvent.meta.input) delete spanEvent.meta.input
+  if (!spanEvent.meta.output) delete spanEvent.meta.output
+
+  Object.assign(spanEvent.meta, meta)
+
+  if (tokenMetrics) spanEvent.metrics = tokenMetrics
+
+  return spanEvent
+}
+
 function expectedLLMObsBaseEvent ({
   span,
   parentId,
@@ -80,22 +111,26 @@ function expectedLLMObsBaseEvent ({
   errorMessage,
   errorStack
 } = {}) {
-  const spanName = name || span.name
+  // the `span` could be a raw DatadogSpan or formatted span
+  const spanName = name || span.name || span._name
+  const spanId = span.span_id ? fromBuffer(span.span_id) : span.context().toSpanId()
+  const startNs = span.start ? fromBuffer(span.start, true) : Math.round(span._startTime * 1e6)
+  const duration = span.duration ? fromBuffer(span.duration, true) : Math.round(span._duration * 1e6)
 
   const spanEvent = {
     trace_id: MOCK_STRING,
-    span_id: fromBuffer(span.span_id),
+    span_id: spanId,
     parent_id: parentId || 'undefined',
     name: spanName,
     tags: expectedLLMObsTags({ span, tags, error, errorType, sessionId }),
-    start_ns: fromBuffer(span.start, true),
-    duration: fromBuffer(span.duration, true),
+    start_ns: startNs,
+    duration,
     status: error ? 'error' : 'ok',
     meta: { 'span.kind': spanKind },
     metrics: {},
     _dd: {
       trace_id: MOCK_STRING,
-      span_id: fromBuffer(span.span_id)
+      span_id: spanId
     }
   }
 
@@ -119,10 +154,14 @@ function expectedLLMObsTags ({
 }) {
   tags = tags || {}
 
+  const version = span.meta?.version || span._parentTracer._version
+  const env = span.meta?.env || span._parentTracer._env
+  const service = span.meta?.service || span._parentTracer._service
+
   const spanTags = [
-    `version:${span.meta.version}`,
-    `env:${span.meta.env}`,
-    `service:${span.meta.service}`,
+    `version:${version ?? ''}`,
+    `env:${env ?? ''}`,
+    `service:${service ?? ''}`,
     'source:integration',
     `ml_app:${tags.ml_app}`,
     `dd-trace.version:${tracerVersion}`
@@ -154,6 +193,7 @@ function fromBuffer (spanProperty, isNumber = false) {
 
 module.exports = {
   expectedLLMObsLLMSpanEvent,
+  expectedLLMObsNonLLMSpanEvent,
   deepEqualWithMockValues,
   MOCK_ANY,
   MOCK_NUMBER,

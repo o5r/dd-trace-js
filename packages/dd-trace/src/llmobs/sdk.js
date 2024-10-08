@@ -31,9 +31,11 @@ class LLMObs {
     this._tagger = new LLMObsTagger(config)
     this._processor = new LLMObsSpanProcessor(config)
 
+    this._handleSpanProcess = data => this._processor.process(data)
+
     if (this.enabled) {
       this._evaluationWriter = new LLMObsEvalMetricsWriter(config)
-      spanProccessCh.subscribe(this._processor.process.bind(this._processor))
+      spanProccessCh.subscribe(this._handleSpanProcess)
     }
   }
 
@@ -72,7 +74,7 @@ class LLMObs {
 
     const SpanWriter = this._config.llmobs.agentlessEnabled ? AgentlessWriter : AgentProxyWriter
     this._processor._writer = new SpanWriter(this._config)
-    spanProccessCh.subscribe(this._processor.process)
+    spanProccessCh.subscribe(this._handleSpanProcess)
   }
 
   disable () {
@@ -86,7 +88,7 @@ class LLMObs {
     this._config.llmobs.enabled = false
     this._llmobsModule.disable()
 
-    spanProccessCh.unsubscribe(this._processor.process)
+    spanProccessCh.unsubscribe(this._handleSpanProcess)
 
     this._evaluationWriter.destroy()
     this._processor._writer.destroy()
@@ -300,31 +302,30 @@ class LLMObs {
       childOf: this._tracer.scope().active()
     })
 
-    const spanProxy = new Proxy(span, {
-      get (target, key) {
-        if (key === 'finish') {
-          return function () {
-            storage.enterWith(oldStore) // restore context
-            return span.finish.apply(span, arguments)
-          }
-        }
-
-        return target[key]
-      }
-    })
+    // we need the span to finish in the same context it was started
+    const originalFinish = span.finish
+    span.finish = function () {
+      span.finish = originalFinish
+      storage.enterWith(oldStore) // restore context
+      return originalFinish.apply(span, arguments)
+    }
 
     const oldStore = storage.getStore()
     const parentLLMObsSpan = oldStore?.llmobsSpan
 
-    this._tagger.setLLMObsSpanTags(spanProxy, valid && kind, {
+    this._tagger.setLLMObsSpanTags(span, valid && kind, {
       ...llmobsOptions,
       parentLLMObsSpan
     })
-    const newStore = spanProxy ? spanProxy._store : oldStore
+    const newStore = span ? span._store : oldStore
 
-    storage.enterWith({ ...newStore, span, llmobsSpan: spanProxy }) // preserve context
+    if (this.enabled) {
+      storage.enterWith({ ...newStore, span, llmobsSpan: span }) // preserve context
+    } else {
+      storage.enterWith({ ...newStore, span }) // preserve context without LLMObs
+    }
 
-    return spanProxy
+    return span
   }
 
   trace (kind, options, fn) {
@@ -353,7 +354,7 @@ class LLMObs {
       return this._tracer.trace(name, spanOptions, (span, cb) => {
         const oldStore = storage.getStore()
         const parentLLMObsSpan = oldStore?.llmobsSpan
-        storage.enterWith({ ...oldStore, llmobsSpan: span })
+        if (this.enabled) storage.enterWith({ ...oldStore, llmobsSpan: span })
 
         this._tagger.setLLMObsSpanTags(span, valid && kind, {
           ...llmobsOptions,
@@ -372,7 +373,7 @@ class LLMObs {
     return this._tracer.trace(name, spanOptions, span => {
       const oldStore = storage.getStore()
       const parentLLMObsSpan = oldStore?.llmobsSpan
-      storage.enterWith({ ...oldStore, llmobsSpan: span })
+      if (this.enabled) storage.enterWith({ ...oldStore, llmobsSpan: span })
 
       this._tagger.setLLMObsSpanTags(span, valid && kind, {
         ...llmobsOptions,
@@ -429,7 +430,7 @@ class LLMObs {
       const span = llmobs._tracer.scope().active()
       const oldStore = storage.getStore()
       const parentLLMObsSpan = oldStore?.llmobsSpan
-      storage.enterWith({ ...oldStore, llmobsSpan: span })
+      if (llmobs.enabled) storage.enterWith({ ...oldStore, llmobsSpan: span })
 
       llmobs._tagger.setLLMObsSpanTags(span, valid && kind, {
         ...llmobsOptions,

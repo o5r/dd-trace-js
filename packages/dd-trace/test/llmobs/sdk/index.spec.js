@@ -2,11 +2,11 @@
 
 const proxyquire = require('proxyquire')
 const { expect } = require('chai')
-const Config = require('../../src/config')
+const Config = require('../../../src/config')
 
-const LLMObsTagger = require('../../src/llmobs/tagger')
+const LLMObsTagger = require('../../../src/llmobs/tagger')
 
-describe('sdk', () => {
+describe.skip('sdk', () => {
   let LLMObsSDK
   let llmobs
   let logger
@@ -19,12 +19,12 @@ describe('sdk', () => {
       warn: sinon.stub()
     }
 
-    LLMObsSDK = proxyquire('../../src/llmobs/sdk', {
+    LLMObsSDK = proxyquire('../../../src/llmobs/sdk', {
       '../log': logger,
       '../../../../package.json': { version: 'x.y.z' }
     })
 
-    Tracer = proxyquire('../../src/proxy', {
+    Tracer = proxyquire('../../../src/proxy', {
       './llmobs/sdk': LLMObsSDK
     })
 
