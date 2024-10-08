@@ -57,13 +57,13 @@ class LLMObs {
       apiKey
     }
 
-    const enabled = !DD_LLMOBS_ENABLED || isTrue(DD_LLMOBS_ENABLED)
+    const enabled = DD_LLMOBS_ENABLED == null || isTrue(DD_LLMOBS_ENABLED)
     if (!enabled) {
       logger.debug('LLMObs.enable() called when DD_LLMOBS_ENABLED is false. No action taken.')
       return
     }
 
-    this._config.llmobs.enabled = !DD_LLMOBS_ENABLED || isTrue(DD_LLMOBS_ENABLED)
+    this._config.llmobs.enabled = true
     this._config.configure({ ...this._config, llmobs: llmobsConfig })
     this._llmobsModule.enable(this._config)
 
