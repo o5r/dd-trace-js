@@ -13,6 +13,9 @@ const tags = {
 const AgentProxyWriter = require('../../../src/llmobs/writers/spans/agentProxy')
 const EvalMetricsWriter = require('../../../src/llmobs/writers/evaluations')
 
+const { channel } = require('dc-polyfill')
+const spanProcessCh = channel('dd-trace:span:process')
+
 describe('end to end sdk integration tests', () => {
   let tracer
   let llmobs
@@ -36,6 +39,7 @@ describe('end to end sdk integration tests', () => {
   }
 
   before(() => {
+    spanProcessCh._subscribers = []
     tracer = require('../../../../../')
     tracer.init({
       llmobs: {
@@ -44,16 +48,20 @@ describe('end to end sdk integration tests', () => {
     })
 
     llmobs = tracer.llmobs
-  })
+    llmobs.disable()
+    llmobs.enable({ mlApp: 'test' })
 
-  beforeEach(() => {
     sinon.spy(llmobs._processor, 'process')
     sinon.stub(AgentProxyWriter.prototype, 'append')
     sinon.stub(EvalMetricsWriter.prototype, 'append')
   })
 
   afterEach(() => {
-    sinon.restore()
+    llmobs._processor.process.resetHistory()
+    AgentProxyWriter.prototype.append.resetHistory()
+    EvalMetricsWriter.prototype.append.resetHistory()
+
+    process.removeAllListeners('beforeExit')
   })
 
   it('uses startSpan correctly', () => {

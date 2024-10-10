@@ -6,7 +6,7 @@ const Config = require('../../../src/config')
 
 const LLMObsTagger = require('../../../src/llmobs/tagger')
 
-describe.skip('sdk', () => {
+describe('sdk', () => {
   let LLMObsSDK
   let llmobs
   let logger
@@ -56,15 +56,23 @@ describe.skip('sdk', () => {
     sinon.spy(llmobs._processor, 'format')
   })
 
+  afterEach(() => {
+    llmobs.disable()
+  })
+
+  after(() => {
+    sinon.restore()
+  })
+
   describe('constructor', () => {
     it('starts the evaluations writer when enabled', () => {
-      llmobs = new LLMObsSDK(null, null, { llmobs: { enabled: true } })
+      llmobs = new LLMObsSDK(null, { disable () {} }, { llmobs: { enabled: true } })
 
       expect(llmobs._evaluationWriter).to.exist
     })
 
     it('does not start the evaluations writer when disabled', () => {
-      llmobs = new LLMObsSDK(null, null, { llmobs: { enabled: false } })
+      llmobs = new LLMObsSDK(null, { disable () {} }, { llmobs: { enabled: false } })
 
       expect(llmobs._evaluationWriter).to.not.exist
     })
@@ -76,7 +84,7 @@ describe.skip('sdk', () => {
       [false, 'disabled']
     ]) {
       it(`returns ${value} when llmobs is ${label}`, () => {
-        llmobs = new LLMObsSDK(null, null, { llmobs: { enabled: value } })
+        llmobs = new LLMObsSDK(null, { disable () {} }, { llmobs: { enabled: value } })
 
         expect(llmobs.enabled).to.equal(value)
       })
@@ -87,7 +95,8 @@ describe.skip('sdk', () => {
     it('enables llmobs if it is disabled', () => {
       const config = new Config({})
       const llmobsModule = {
-        enable: sinon.stub()
+        enable: sinon.stub(),
+        disable () {}
       }
       llmobs = new LLMObsSDK(tracer._tracer, llmobsModule, config)
 
@@ -154,7 +163,7 @@ describe.skip('sdk', () => {
     })
 
     it('does not disable llmobs if it is already disabled', () => {
-      llmobs = new LLMObsSDK(null, null, { llmobs: { enabled: false } })
+      llmobs = new LLMObsSDK(null, { disable () {} }, { llmobs: { enabled: false } })
 
       llmobs.disable()
 
@@ -971,6 +980,8 @@ describe.skip('sdk', () => {
       expect(logger.warn).to.have.been.calledWith(
         'Failed to flush LLMObs spans and evaluation metrics'
       )
+
+      llmobs._evaluationWriter.flush.resetBehavior()
     })
   })
 })
