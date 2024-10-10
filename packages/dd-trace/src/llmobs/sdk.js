@@ -443,7 +443,7 @@ class LLMObs {
 
         if (result && typeof result.then === 'function') {
           return result.then(value => {
-            if (value && kind !== 'retrieval' && !LLMObsTagger.tagMap.get(span)[OUTPUT_VALUE]) {
+            if (value && kind !== 'retrieval' && !LLMObsTagger.tagMap.get(span)?.[OUTPUT_VALUE]) {
               llmobs.annotate(span, { outputData: value })
             }
             storage.enterWith(oldStore)
@@ -454,7 +454,7 @@ class LLMObs {
           })
         }
 
-        if (result && kind !== 'retrieval' && !LLMObsTagger.tagMap.get(span)[OUTPUT_VALUE]) {
+        if (result && kind !== 'retrieval' && !LLMObsTagger.tagMap.get(span)?.[OUTPUT_VALUE]) {
           llmobs.annotate(span, { outputData: result })
           storage.enterWith(oldStore)
         }
@@ -471,11 +471,33 @@ class LLMObs {
 
   decorate (kind, options) {
     const llmobs = this
-    return function (target, ctx) {
-      if (ctx.kind !== 'method') return target
+    logger.debug('llmobs.decorate called')
+    return function (target, ctxOrPropertyKey, descriptor) {
+      if (!ctxOrPropertyKey) return target
+      if (typeof ctxOrPropertyKey === 'string') {
+        const propertyKey = ctxOrPropertyKey
+        if (descriptor) {
+          if (typeof descriptor.value !== 'function') return descriptor
 
-      // override name if specified on options
-      return llmobs.wrap(kind, { name: ctx.name, ...options }, target)
+          descriptor.value = llmobs.wrap(kind, { name: propertyKey, ...options }, descriptor.value)
+
+          return descriptor
+        } else {
+          if (typeof target[propertyKey] !== 'function') return target
+
+          Object.defineProperty(target, propertyKey, {
+            ...Object.getOwnPropertyDescriptor(target, propertyKey),
+            value: llmobs.wrap(kind, { name: propertyKey, ...options }, target[propertyKey])
+          })
+
+          return target
+        }
+      } else {
+        const ctx = ctxOrPropertyKey
+        if (ctx.kind !== 'method') return target
+
+        return llmobs.wrap(kind, { name: ctx.name, ...options }, target)
+      }
     }
   }
 
