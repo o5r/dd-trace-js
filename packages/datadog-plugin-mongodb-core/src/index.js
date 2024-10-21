@@ -10,7 +10,7 @@ class MongodbCorePlugin extends DatabasePlugin {
   static get peerServicePrecursors () { return [] }
   start ({ ns, ops, options = {}, name }) {
     const query = getQuery(ops)
-    const resource = truncate(getResource(this, ns, query, name))
+    const resource = truncate(getResource(this, ns, query, name, ops.aggregate))
     this.startSpan(this.operationName(), {
       service: this.serviceName({ pluginConfig: this.config }),
       resource,
@@ -47,8 +47,9 @@ function getQuery (cmd) {
   if (cmd.pipeline) return sanitizeBigInt(limitDepth(cmd.pipeline))
 }
 
-function getResource (plugin, ns, query, operationName) {
-  const parts = [operationName, ns]
+function getResource (plugin, ns, query, operationName, aggregateCollection) {
+  const appendedNs = aggregateCollection ? `${ns}.${aggregateCollection}` : ns
+  const parts = [operationName, appendedNs]
 
   if (plugin.config.queryInResourceName && query) {
     parts.push(query)
