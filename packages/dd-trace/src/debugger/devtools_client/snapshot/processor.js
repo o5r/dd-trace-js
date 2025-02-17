@@ -1,5 +1,8 @@
 'use strict'
 
+const { collectionSizeSym, fieldCountSym } = require('./symbols')
+const { normalizeName, REDACTED_IDENTIFIERS } = require('./redaction')
+
 module.exports = {
   processRawState: processProperties
 }
@@ -22,7 +25,14 @@ function processProperties (props, maxLength) {
   return result
 }
 
+// TODO: Improve performance of redaction algorithm.
+// This algorithm is probably slower than if we embedded the redaction logic inside the functions below.
+// That way we didn't have to traverse objects that will just be redacted anyway.
 function getPropertyValue (prop, maxLength) {
+  return redact(prop, getPropertyValueRaw(prop, maxLength))
+}
+
+function getPropertyValueRaw (prop, maxLength) {
   // Special case for getters and setters which does not have a value property
   if ('get' in prop) {
     const hasGet = prop.get.type !== 'undefined'
@@ -137,24 +147,32 @@ function toString (str, maxLength) {
 
 function toObject (type, props, maxLength) {
   if (props === undefined) return notCapturedDepth(type)
-  return { type, fields: processProperties(props, maxLength) }
+
+  const result = {
+    type,
+    fields: processProperties(props, maxLength)
+  }
+
+  if (fieldCountSym in props) {
+    result.notCapturedReason = 'fieldCount'
+    result.size = props[fieldCountSym]
+  }
+
+  return result
 }
 
 function toArray (type, elements, maxLength) {
   if (elements === undefined) return notCapturedDepth(type)
 
   // Perf: Create array of expected size in advance (expect that it contains only one non-enumrable element)
-  const expectedLength = elements.length - 1
-  const result = { type, elements: new Array(expectedLength) }
+  const result = { type, elements: new Array(elements.length) }
+
+  setNotCaptureReasonOnCollection(result, elements)
 
   let i = 0
   for (const elm of elements) {
-    if (elm.enumerable === false) continue // the value of the `length` property should not be part of the array
     result.elements[i++] = getPropertyValue(elm, maxLength)
   }
-
-  // Safe-guard in case there were more than one non-enumerable element
-  if (i < expectedLength) result.elements.length = i
 
   return result
 }
@@ -162,26 +180,26 @@ function toArray (type, elements, maxLength) {
 function toMap (type, pairs, maxLength) {
   if (pairs === undefined) return notCapturedDepth(type)
 
-  // Perf: Create array of expected size in advance (expect that it contains only one non-enumrable element)
-  const expectedLength = pairs.length - 1
-  const result = { type, entries: new Array(expectedLength) }
+  // Perf: Create array of expected size in advance
+  const result = { type, entries: new Array(pairs.length) }
+
+  setNotCaptureReasonOnCollection(result, pairs)
 
   let i = 0
   for (const pair of pairs) {
-    if (pair.enumerable === false) continue // the value of the `length` property should not be part of the map
     // The following code is based on assumptions made when researching the output of the Chrome DevTools Protocol.
     // There doesn't seem to be any documentation to back it up:
     //
     // `pair.value` is a special wrapper-object with subtype `internal#entry`. This can be skipped and we can go
     // directly to its children, of which there will always be exactly two, the first containing the key, and the
     // second containing the value of this entry of the Map.
+    const shouldRedact = shouldRedactMapValue(pair.value.properties[0])
     const key = getPropertyValue(pair.value.properties[0], maxLength)
-    const val = getPropertyValue(pair.value.properties[1], maxLength)
+    const val = shouldRedact
+      ? notCapturedRedacted(pair.value.properties[1].value.type)
+      : getPropertyValue(pair.value.properties[1], maxLength)
     result.entries[i++] = [key, val]
   }
-
-  // Safe-guard in case there were more than one non-enumerable element
-  if (i < expectedLength) result.entries.length = i
 
   return result
 }
@@ -190,12 +208,12 @@ function toSet (type, values, maxLength) {
   if (values === undefined) return notCapturedDepth(type)
 
   // Perf: Create array of expected size in advance (expect that it contains only one non-enumrable element)
-  const expectedLength = values.length - 1
-  const result = { type, elements: new Array(expectedLength) }
+  const result = { type, elements: new Array(values.length) }
+
+  setNotCaptureReasonOnCollection(result, values)
 
   let i = 0
   for (const value of values) {
-    if (value.enumerable === false) continue // the value of the `length` property should not be part of the set
     // The following code is based on assumptions made when researching the output of the Chrome DevTools Protocol.
     // There doesn't seem to be any documentation to back it up:
     //
@@ -204,9 +222,6 @@ function toSet (type, values, maxLength) {
     // of the Set.
     result.elements[i++] = getPropertyValue(value.value.properties[0], maxLength)
   }
-
-  // Safe-guard in case there were more than one non-enumerable element
-  if (i < expectedLength) result.elements.length = i
 
   return result
 }
@@ -236,6 +251,36 @@ function arrayBufferToString (bytes, size) {
   return buf.toString()
 }
 
+function redact (prop, obj) {
+  const name = getNormalizedNameFromProp(prop)
+  return REDACTED_IDENTIFIERS.has(name) ? notCapturedRedacted(obj.type) : obj
+}
+
+function shouldRedactMapValue (key) {
+  const isSymbol = key.value.type === 'symbol'
+  if (!isSymbol && key.value.type !== 'string') return false // WeakMaps uses objects as keys
+  const name = normalizeName(
+    isSymbol ? key.value.description : key.value.value,
+    isSymbol
+  )
+  return REDACTED_IDENTIFIERS.has(name)
+}
+
+function getNormalizedNameFromProp (prop) {
+  return normalizeName(prop.name, 'symbol' in prop)
+}
+
+function setNotCaptureReasonOnCollection (result, collection) {
+  if (collectionSizeSym in collection) {
+    result.notCapturedReason = 'collectionSize'
+    result.size = collection[collectionSizeSym]
+  }
+}
+
 function notCapturedDepth (type) {
   return { type, notCapturedReason: 'depth' }
+}
+
+function notCapturedRedacted (type) {
+  return { type, notCapturedReason: 'redactedIdent' }
 }

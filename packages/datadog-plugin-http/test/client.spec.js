@@ -446,6 +446,43 @@ describe('Plugin', () => {
           })
         })
 
+        it('should inject tracing header into request without mutating the header', done => {
+          // ensures that the tracer clones request headers instead of mutating.
+          // Fixes aws-sdk InvalidSignatureException, more info:
+          // https://github.com/open-telemetry/opentelemetry-js-contrib/issues/1609#issuecomment-1826167348
+
+          const app = express()
+
+          const originalHeaders = {
+            Authorization: 'AWS4-HMAC-SHA256 ...'
+          }
+
+          app.get('/', (req, res) => {
+            try {
+              expect(req.get('x-datadog-trace-id')).to.be.a('string')
+              expect(req.get('x-datadog-parent-id')).to.be.a('string')
+
+              expect(originalHeaders['x-datadog-trace-id']).to.be.undefined
+              expect(originalHeaders['x-datadog-parent-id']).to.be.undefined
+
+              res.status(200).send()
+
+              done()
+            } catch (e) {
+              done(e)
+            }
+          })
+
+          appListener = server(app, port => {
+            const req = http.request({
+              port,
+              headers: originalHeaders
+            })
+
+            req.end()
+          })
+        })
+
         it('should run the callback in the parent context', done => {
           const app = express()
 
@@ -885,15 +922,15 @@ describe('Plugin', () => {
               })
 
             appListener = server(app, port => {
-              const store = storage.getStore()
+              const store = storage('legacy').getStore()
 
-              storage.enterWith({ noop: true })
+              storage('legacy').enterWith({ noop: true })
               const req = http.request(tracer._tracer._url.href)
 
               req.on('error', () => {})
               req.end()
 
-              storage.enterWith(store)
+              storage('legacy').enterWith(store)
             })
           })
         }

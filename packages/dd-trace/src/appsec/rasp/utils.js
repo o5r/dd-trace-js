@@ -1,20 +1,21 @@
 'use strict'
 
 const web = require('../../plugins/util/web')
-const { reportStackTrace } = require('../stack_trace')
+const { getCallsiteFrames, reportStackTrace, canReportStackTrace } = require('../stack_trace')
 const { getBlockingAction } = require('../blocking')
 const log = require('../../log')
 
 const abortOnUncaughtException = process.execArgv?.includes('--abort-on-uncaught-exception')
 
 if (abortOnUncaughtException) {
-  log.warn('The --abort-on-uncaught-exception flag is enabled. The RASP module will not block operations.')
+  log.warn('[ASM] The --abort-on-uncaught-exception flag is enabled. The RASP module will not block operations.')
 }
 
 const RULE_TYPES = {
-  SSRF: 'ssrf',
+  COMMAND_INJECTION: 'command_injection',
+  LFI: 'lfi',
   SQL_INJECTION: 'sql_injection',
-  LFI: 'lfi'
+  SSRF: 'ssrf'
 }
 
 class DatadogRaspAbortError extends Error {
@@ -29,13 +30,18 @@ class DatadogRaspAbortError extends Error {
 
 function handleResult (actions, req, res, abortController, config) {
   const generateStackTraceAction = actions?.generate_stack
-  if (generateStackTraceAction && config.appsec.stackTrace.enabled) {
-    const rootSpan = web.root(req)
+
+  const { enabled, maxDepth, maxStackTraces } = config.appsec.stackTrace
+
+  const rootSpan = web.root(req)
+
+  if (generateStackTraceAction && enabled && canReportStackTrace(rootSpan, maxStackTraces)) {
+    const frames = getCallsiteFrames(maxDepth)
+
     reportStackTrace(
       rootSpan,
       generateStackTraceAction.stack_id,
-      config.appsec.stackTrace.maxDepth,
-      config.appsec.stackTrace.maxStackTraces
+      frames
     )
   }
 

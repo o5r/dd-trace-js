@@ -85,10 +85,6 @@ interface Tracer extends opentracing.Tracer {
    * span will finish when that callback is called.
    * * The function doesn't accept a callback and doesn't return a promise, in
    * which case the span will finish at the end of the function execution.
-   *
-   * If the `orphanable` option is set to false, the function will not be traced
-   * unless there is already an active span or `childOf` option. Note that this
-   * option is deprecated and has been removed in version 4.0.
    */
   trace<T> (name: string, fn: (span: tracer.Span) => T): T;
   trace<T> (name: string, fn: (span: tracer.Span, done: (error?: Error) => void) => T): T;
@@ -137,6 +133,11 @@ interface Tracer extends opentracing.Tracer {
   TracerProvider: tracer.opentelemetry.TracerProvider;
 
   dogstatsd: tracer.DogStatsD;
+
+  /**
+   * LLM Observability SDK
+   */
+  llmobs: tracer.llmobs.LLMObs;
 }
 
 // left out of the namespace, so it
@@ -174,6 +175,7 @@ interface Plugins {
   "kafkajs": tracer.plugins.kafkajs
   "knex": tracer.plugins.knex;
   "koa": tracer.plugins.koa;
+  "langchain": tracer.plugins.langchain;
   "mariadb": tracer.plugins.mariadb;
   "memcached": tracer.plugins.memcached;
   "microgateway-core": tracer.plugins.microgateway_core;
@@ -649,27 +651,33 @@ declare namespace tracer {
        */
       eventTracking?: {
         /**
-         * Controls the automated user event tracking mode. Possible values are disabled, safe and extended.
-         * On safe mode, any detected Personally Identifiable Information (PII) about the user will be redacted from the event.
-         * On extended mode, no redaction will take place.
-         * @default 'safe'
+         * Controls the automated user tracking mode for user IDs and logins collections. Possible values:
+         * *  'anonymous': will hash user IDs and user logins before collecting them
+         * *  'anon': alias for 'anonymous'
+         * *  'safe': deprecated alias for 'anonymous'
+         *
+         * *  'identification': will collect user IDs and logins without redaction
+         * *  'ident': alias for 'identification'
+         * *  'extended': deprecated alias for 'identification'
+         *
+         * *  'disabled': will not collect user IDs and logins
+         *
+         * Unknown values will be considered as 'disabled'
+         * @default 'identification'
          */
-        mode?: 'safe' | 'extended' | 'disabled'
+        mode?:
+          'anonymous' | 'anon' | 'safe' |
+          'identification' | 'ident' | 'extended' |
+          'disabled'
       },
       /**
-       * Configuration for Api Security sampling
+       * Configuration for Api Security
        */
       apiSecurity?: {
         /** Whether to enable Api Security.
-         * @default false
+         * @default true
          */
         enabled?: boolean,
-
-        /** Controls the request sampling rate (between 0 and 1) in which Api Security is triggered.
-         * The value will be coerced back if it's outside of the 0-1 range.
-         * @default 0.1
-         */
-        requestSampling?: number
       },
       /**
        * Configuration for RASP
@@ -752,6 +760,11 @@ declare namespace tracer {
        */
       maxDepth?: number
     }
+
+    /**
+     * Configuration enabling LLM Observability. Enablement is superceded by the DD_LLMOBS_ENABLED environment variable.
+     */
+    llmobs?: llmobs.LLMObsEnableOptions
   }
 
   /**
@@ -1033,6 +1046,14 @@ declare namespace tracer {
        * @default code => code < 500
        */
       validateStatus?: (code: number) => boolean;
+
+      /**
+       * Enable injection of tracing headers into requests signed with AWS IAM headers.
+       * Disable this if you get AWS signature errors (HTTP 403).
+       *
+       * @default false
+       */
+      enablePropagationWithAmazonHeaders?: boolean;
     }
 
     /** @hidden */
@@ -1579,6 +1600,12 @@ declare namespace tracer {
      * [kafkajs](https://kafka.js.org/) module.
      */
     interface kafkajs extends Instrumentation {}
+
+    /**
+     * This plugin automatically instruments the
+     * [langchain](https://js.langchain.com/) module
+     */
+    interface langchain extends Instrumentation {}
 
     /**
      * This plugin automatically instruments the
@@ -2173,6 +2200,12 @@ declare namespace tracer {
     cookieFilterPattern?: string,
 
     /**
+     * Defines the number of rows to taint in data coming from databases
+     * @default 1
+     */
+    dbRowsToTaint?: number,
+
+    /**
      * Whether to enable vulnerability deduplication
      */
     deduplicationEnabled?: boolean,
@@ -2194,9 +2227,349 @@ declare namespace tracer {
     redactionValuePattern?: string,
 
     /**
+     * Allows to enable security controls.
+     */
+    securityControlsConfiguration?: string,
+
+    /**
      * Specifies the verbosity of the sent telemetry. Default 'INFORMATION'
      */
-    telemetryVerbosity?: string
+    telemetryVerbosity?: string,
+
+    /**
+     * Configuration for stack trace reporting
+     */
+    stackTrace?: {
+      /** Whether to enable stack trace reporting.
+       * @default true
+       */
+      enabled?: boolean,
+    }
+  }
+
+  export namespace llmobs {
+    export interface LLMObs {
+
+      /**
+       * Whether or not LLM Observability is enabled.
+       */
+      enabled: boolean,
+
+      /**
+       * Enable LLM Observability tracing.
+       */
+      enable (options: LLMObsEnableOptions): void,
+
+      /**
+       * Disable LLM Observability tracing.
+       */
+      disable (): void,
+
+      /**
+       * Instruments a function by automatically creating a span activated on its
+       * scope.
+       *
+       * The span will automatically be finished when one of these conditions is
+       * met:
+       *
+       * * The function returns a promise, in which case the span will finish when
+       * the promise is resolved or rejected.
+       * * The function takes a callback as its second parameter, in which case the
+       * span will finish when that callback is called.
+       * * The function doesn't accept a callback and doesn't return a promise, in
+       * which case the span will finish at the end of the function execution.
+       * @param fn The function to instrument.
+       * @param options Optional LLM Observability span options.
+       * @returns The return value of the function.
+       */
+      trace<T> (options: LLMObsNamedSpanOptions, fn: (span: tracer.Span, done: (error?: Error) => void) => T): T
+
+      /**
+       * Wrap a function to automatically create a span activated on its
+       * scope when it's called.
+       *
+       * The span will automatically be finished when one of these conditions is
+       * met:
+       *
+       * * The function returns a promise, in which case the span will finish when
+       * the promise is resolved or rejected.
+       * * The function takes a callback as its last parameter, in which case the
+       * span will finish when that callback is called.
+       * * The function doesn't accept a callback and doesn't return a promise, in
+       * which case the span will finish at the end of the function execution.
+       * @param fn The function to instrument.
+       * @param options Optional LLM Observability span options.
+       * @returns A new function that wraps the provided function with span creation.
+       */
+      wrap<T = (...args: any[]) => any> (options: LLMObsNamelessSpanOptions, fn: T): T
+
+      /**
+       * Decorate a function in a javascript runtime that supports function decorators.
+       * Note that this is **not** supported in the Node.js runtime, but is in TypeScript.
+       *
+       * In TypeScript, this decorator is only supported in contexts where general TypeScript
+       * function decorators are supported.
+       *
+       * @param options Optional LLM Observability span options.
+       */
+      decorate (options: llmobs.LLMObsNamelessSpanOptions): any
+
+      /**
+       * Returns a representation of a span to export its span and trace IDs.
+       * If no span is provided, the current LLMObs-type span will be used.
+       * @param span Optional span to export.
+       * @returns An object containing the span and trace IDs.
+       */
+      exportSpan (span?: tracer.Span): llmobs.ExportedLLMObsSpan
+
+
+      /**
+       * Sets inputs, outputs, tags, metadata, and metrics as provided for a given LLM Observability span.
+       * Note that with the exception of tags, this method will override any existing values for the provided fields.
+       *
+       * For example:
+       * ```javascript
+       * llmobs.trace({ kind: 'llm', name: 'myLLM', modelName: 'gpt-4o', modelProvider: 'openai' }, () => {
+       *  llmobs.annotate({
+       *    inputData: [{ content: 'system prompt, role: 'system' }, { content: 'user prompt', role: 'user' }],
+       *    outputData: { content: 'response', role: 'ai' },
+       *    metadata: { temperature: 0.7 },
+       *    tags: { host: 'localhost' },
+       *    metrics: { inputTokens: 10, outputTokens: 20, totalTokens: 30 }
+       *  })
+       * })
+       * ```
+       *
+       * @param span The span to annotate (defaults to the current LLM Observability span if not provided)
+       * @param options An object containing the inputs, outputs, tags, metadata, and metrics to set on the span.
+       */
+      annotate (options: llmobs.AnnotationOptions): void
+      annotate (span: tracer.Span | undefined, options: llmobs.AnnotationOptions): void
+
+      /**
+       * Submits a custom evalutation metric for a given span ID and trace ID.
+       * @param spanContext The span context of the span to submit the evaluation metric for.
+       * @param options An object containing the label, metric type, value, and tags of the evaluation metric.
+       */
+      submitEvaluation (spanContext: llmobs.ExportedLLMObsSpan, options: llmobs.EvaluationOptions): void
+
+      /**
+       * Flushes any remaining spans and evaluation metrics to LLM Observability.
+       */
+      flush (): void
+    }
+
+    interface EvaluationOptions {
+      /**
+       * The name of the evalutation metric
+       */
+      label: string,
+
+      /**
+       * The type of evaluation metric, one of 'categorical' or 'score'
+       */
+      metricType: 'categorical' | 'score',
+
+      /**
+       * The value of the evaluation metric.
+       * Must be string for 'categorical' metrics and number for 'score' metrics.
+       */
+      value: string | number,
+
+      /**
+       * An object of string key-value pairs to tag the evaluation metric with.
+       */
+      tags?: { [key: string]: any },
+
+      /**
+       * The name of the ML application
+       */
+      mlApp?: string,
+
+      /**
+       * The timestamp in milliseconds when the evaluation metric result was generated.
+       */
+      timestampMs?: number
+    }
+
+    interface Document {
+      /**
+       * Document text
+       */
+      text?: string,
+
+      /**
+       * Document name
+       */
+      name?: string,
+
+      /**
+       * Document ID
+       */
+      id?: string,
+
+      /**
+       * Score of the document retrieval as a source of ground truth
+       */
+      score?: number
+    }
+
+    /**
+     * Represents a single LLM chat model message
+     */
+    interface Message {
+      /**
+       * Content of the message.
+       */
+      content: string,
+
+      /**
+       * Role of the message (ie system, user, ai)
+       */
+      role?: string,
+
+      /**
+       * Tool calls of the message
+       */
+      toolCalls?: ToolCall[],
+    }
+
+    /**
+     * Represents a single tool call for an LLM chat model message
+     */
+    interface ToolCall {
+      /**
+       * Name of the tool
+       */
+      name?: string,
+
+      /**
+       * Arguments passed to the tool
+       */
+      arguments?: { [key: string]: any },
+
+      /**
+       * The tool ID
+       */
+      toolId?: string,
+
+      /**
+       * The tool type
+       */
+      type?: string
+    }
+
+    /**
+     * Annotation options for LLM Observability spans.
+     */
+    interface AnnotationOptions {
+      /**
+       * A single input string, object, or a list of objects based on the span kind:
+       * 1. LLM spans: accepts a string, or an object of the form {content: "...", role: "..."}, or a list of objects with the same signature.
+       * 2. Embedding spans: accepts a string, list of strings, or an object of the form {text: "...", ...}, or a list of objects with the same signature.
+       * 3. Other: any JSON serializable type
+       */
+      inputData?: string | Message | Message[] | Document | Document[] | { [key: string]: any },
+
+      /**
+       * A single output string, object, or a list of objects based on the span kind:
+       * 1. LLM spans: accepts a string, or an object of the form {content: "...", role: "..."}, or a list of objects with the same signature.
+       * 2. Retrieval spans: An object containing any of the key value pairs {name: str, id: str, text: str, source: number} or a list of dictionaries with the same signature.
+       * 3. Other: any JSON serializable type
+       */
+      outputData?: string | Message | Message[] | Document | Document[] | { [key: string]: any },
+
+      /**
+       * Object of JSON serializable key-value metadata pairs relevant to the input/output operation described by the LLM Observability span.
+       */
+      metadata?: { [key: string]: any },
+
+      /**
+       * Object of JSON seraliazable key-value metrics (number) pairs, such as `{input,output,total}Tokens`
+       */
+      metrics?: { [key: string]: number },
+
+      /**
+       * Object of JSON serializable key-value tag pairs to set or update on the LLM Observability span regarding the span's context.
+       */
+      tags?: { [key: string]: any }
+    }
+
+    /**
+     * An object containing the span ID and trace ID of interest
+     */
+    interface ExportedLLMObsSpan {
+      /**
+       * Trace ID associated with the span of interest
+       */
+      traceId: string,
+
+      /**
+       * Span ID associated with the span of interest
+       */
+      spanId: string,
+    }
+
+    interface LLMObsSpanOptions extends SpanOptions {
+      /**
+       * LLM Observability span kind. One of `agent`, `workflow`, `task`, `tool`, `retrieval`, `embedding`, or `llm`.
+       */
+      kind: llmobs.spanKind,
+
+      /**
+       * The ID of the underlying user session. Required for tracking sessions.
+       */
+      sessionId?: string,
+
+      /**
+       * The name of the ML application that the agent is orchestrating.
+       * If not provided, the default value will be set to mlApp provided during initalization, or `DD_LLMOBS_ML_APP`.
+       */
+      mlApp?: string,
+
+      /**
+       * The name of the invoked LLM or embedding model. Only used on `llm` and `embedding` spans.
+       */
+      modelName?: string,
+
+      /**
+       * The name of the invoked LLM or embedding model provider. Only used on `llm` and `embedding` spans.
+       * If not provided for LLM or embedding spans, a default value of 'custom' will be set.
+       */
+      modelProvider?: string,
+    }
+
+    interface LLMObsNamedSpanOptions extends LLMObsSpanOptions {
+      /**
+       * The name of the traced operation. This is a required option.
+       */
+      name: string,
+    }
+
+    interface LLMObsNamelessSpanOptions extends LLMObsSpanOptions {
+      /**
+       * The name of the traced operation.
+       */
+      name?: string,
+    }
+
+    /**
+     * Options for enabling LLM Observability tracing.
+     */
+    interface LLMObsEnableOptions {
+      /**
+       * The name of your ML application.
+       */
+      mlApp?: string,
+
+      /**
+       * Set to `true` to disbale sending data that requires a Datadog Agent.
+       */
+      agentlessEnabled?: boolean,
+    }
+
+    /** @hidden */
+    type spanKind = 'agent' | 'workflow' | 'task' | 'tool' | 'retrieval' | 'embedding' | 'llm'
   }
 }
 

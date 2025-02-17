@@ -6,8 +6,10 @@ const { sendGitMetadata: sendGitMetadataRequest } = require('./git/git_metadata'
 const { getLibraryConfiguration: getLibraryConfigurationRequest } = require('../requests/get-library-configuration')
 const { getSkippableSuites: getSkippableSuitesRequest } = require('../intelligent-test-runner/get-skippable-suites')
 const { getKnownTests: getKnownTestsRequest } = require('../early-flake-detection/get-known-tests')
+const { getQuarantinedTests: getQuarantinedTestsRequest } = require('../quarantined-tests/get-quarantined-tests')
 const log = require('../../log')
 const AgentInfoExporter = require('../../exporters/common/agent-info-exporter')
+const { GIT_REPOSITORY_URL, GIT_COMMIT_SHA } = require('../../plugins/util/tags')
 
 function getTestConfigurationTags (tags) {
   if (!tags) {
@@ -36,6 +38,7 @@ class CiVisibilityExporter extends AgentInfoExporter {
     super(config)
     this._timer = undefined
     this._coverageTimer = undefined
+    this._logsTimer = undefined
     this._coverageBuffer = []
     // The library can use new features like ITR and test suite level visibility
     // AKA CI Vis Protocol
@@ -71,6 +74,9 @@ class CiVisibilityExporter extends AgentInfoExporter {
       if (this._coverageWriter) {
         this._coverageWriter.flush()
       }
+      if (this._logsWriter) {
+        this._logsWriter.flush()
+      }
     })
   }
 
@@ -82,9 +88,16 @@ class CiVisibilityExporter extends AgentInfoExporter {
 
   shouldRequestKnownTests () {
     return !!(
-      this._config.isEarlyFlakeDetectionEnabled &&
       this._canUseCiVisProtocol &&
-      this._libraryConfig?.isEarlyFlakeDetectionEnabled
+      this._libraryConfig?.isKnownTestsEnabled
+    )
+  }
+
+  shouldRequestQuarantinedTests () {
+    return !!(
+      this._canUseCiVisProtocol &&
+      this._config.isTestManagementEnabled &&
+      this._libraryConfig?.isQuarantinedTestsEnabled
     )
   }
 
@@ -132,6 +145,13 @@ class CiVisibilityExporter extends AgentInfoExporter {
       return callback(null)
     }
     getKnownTestsRequest(this.getRequestConfiguration(testConfiguration), callback)
+  }
+
+  getQuarantinedTests (testConfiguration, callback) {
+    if (!this.shouldRequestQuarantinedTests()) {
+      return callback(null)
+    }
+    getQuarantinedTestsRequest(this.getRequestConfiguration(testConfiguration), callback)
   }
 
   /**
@@ -191,7 +211,10 @@ class CiVisibilityExporter extends AgentInfoExporter {
       isEarlyFlakeDetectionEnabled,
       earlyFlakeDetectionNumRetries,
       earlyFlakeDetectionFaultyThreshold,
-      isFlakyTestRetriesEnabled
+      isFlakyTestRetriesEnabled,
+      isDiEnabled,
+      isKnownTestsEnabled,
+      isQuarantinedTestsEnabled
     } = remoteConfiguration
     return {
       isCodeCoverageEnabled,
@@ -202,7 +225,10 @@ class CiVisibilityExporter extends AgentInfoExporter {
       earlyFlakeDetectionNumRetries,
       earlyFlakeDetectionFaultyThreshold,
       isFlakyTestRetriesEnabled: isFlakyTestRetriesEnabled && this._config.isFlakyTestRetriesEnabled,
-      flakyTestRetriesCount: this._config.flakyTestRetriesCount
+      flakyTestRetriesCount: this._config.flakyTestRetriesCount,
+      isDiEnabled: isDiEnabled && this._config.isTestDynamicInstrumentationEnabled,
+      isKnownTestsEnabled,
+      isQuarantinedTestsEnabled: isQuarantinedTestsEnabled && this._config.isTestManagementEnabled
     }
   }
 
@@ -220,7 +246,7 @@ class CiVisibilityExporter extends AgentInfoExporter {
         repositoryUrl,
         (err) => {
           if (err) {
-            log.error(`Error uploading git metadata: ${err.message}`)
+            log.error('Error uploading git metadata: %s', err.message)
           } else {
             log.debug('Successfully uploaded git metadata')
           }
@@ -255,17 +281,73 @@ class CiVisibilityExporter extends AgentInfoExporter {
     this._export(formattedCoverage, this._coverageWriter, '_coverageTimer')
   }
 
+  formatLogMessage (testConfiguration, logMessage) {
+    const {
+      [GIT_REPOSITORY_URL]: gitRepositoryUrl,
+      [GIT_COMMIT_SHA]: gitCommitSha
+    } = testConfiguration
+
+    const { service, env, version } = this._config
+
+    return {
+      ddtags: [
+        ...(logMessage.ddtags || []),
+        `${GIT_REPOSITORY_URL}:${gitRepositoryUrl}`,
+        `${GIT_COMMIT_SHA}:${gitCommitSha}`
+      ].join(','),
+      level: 'error',
+      service,
+      dd: {
+        ...(logMessage.dd || []),
+        service,
+        env,
+        version
+      },
+      ddsource: 'dd_debugger',
+      ...logMessage
+    }
+  }
+
+  // DI logs
+  exportDiLogs (testConfiguration, logMessage) {
+    // TODO: could we lose logs if it's not initialized?
+    if (!this._config.isTestDynamicInstrumentationEnabled || !this._isInitialized || !this._canForwardLogs) {
+      return
+    }
+
+    this._export(
+      this.formatLogMessage(testConfiguration, logMessage),
+      this._logsWriter,
+      '_logsTimer'
+    )
+  }
+
   flush (done = () => {}) {
     if (!this._isInitialized) {
       return done()
     }
-    this._writer.flush(() => {
-      if (this._coverageWriter) {
-        this._coverageWriter.flush(done)
-      } else {
+
+    // TODO: safe to do them at once? Or do we want to do them one by one?
+    const writers = [
+      this._writer,
+      this._coverageWriter,
+      this._logsWriter
+    ].filter(writer => writer)
+
+    let remaining = writers.length
+
+    if (remaining === 0) {
+      return done()
+    }
+
+    const onFlushComplete = () => {
+      remaining -= 1
+      if (remaining === 0) {
         done()
       }
-    })
+    }
+
+    writers.forEach(writer => writer.flush(onFlushComplete))
   }
 
   exportUncodedCoverages () {
@@ -284,7 +366,7 @@ class CiVisibilityExporter extends AgentInfoExporter {
       this._writer.setUrl(url)
       this._coverageWriter.setUrl(coverageUrl)
     } catch (e) {
-      log.error(e)
+      log.error('Error setting CI exporter url', e)
     }
   }
 

@@ -16,6 +16,7 @@ const NoopDogStatsDClient = require('./noop/dogstatsd')
 const spanleak = require('./spanleak')
 const { SSIHeuristics } = require('./profiling/ssi-heuristics')
 const appsecStandalone = require('./appsec/standalone')
+const LLMObsSDK = require('./llmobs/sdk')
 
 class LazyModule {
   constructor (provider) {
@@ -46,7 +47,8 @@ class Tracer extends NoopProxy {
     // these requires must work with esm bundler
     this._modules = {
       appsec: new LazyModule(() => require('./appsec')),
-      iast: new LazyModule(() => require('./appsec/iast'))
+      iast: new LazyModule(() => require('./appsec/iast')),
+      llmobs: new LazyModule(() => require('./llmobs'))
     }
   }
 
@@ -57,6 +59,11 @@ class Tracer extends NoopProxy {
 
     try {
       const config = new Config(options) // TODO: support dynamic code config
+
+      if (config.crashtracking.enabled) {
+        require('./crashtracking').start(config)
+      }
+
       telemetry.start(config, this._pluginManager)
 
       if (config.dogstatsd) {
@@ -112,7 +119,7 @@ class Tracer extends NoopProxy {
           this._flare.module.send(conf.args)
         })
 
-        if (config.dynamicInstrumentationEnabled) {
+        if (config.dynamicInstrumentation.enabled) {
           DynamicInstrumentation.start(config, rc)
         }
       }
@@ -159,7 +166,10 @@ class Tracer extends NoopProxy {
         if (config.isManualApiEnabled) {
           const TestApiManualPlugin = require('./ci-visibility/test-api-manual/test-api-manual-plugin')
           this._testApiManualPlugin = new TestApiManualPlugin(this)
-          this._testApiManualPlugin.configure({ ...config, enabled: true })
+          // `shouldGetEnvironmentData` is passed as false so that we only lazily calculate it
+          // This is the only place where we need to do this because the rest of the plugins
+          // are lazily configured when the library is imported.
+          this._testApiManualPlugin.configure({ ...config, enabled: true }, false)
         }
       }
       if (config.ciVisAgentlessLogSubmissionEnabled) {
@@ -174,8 +184,13 @@ class Tracer extends NoopProxy {
           )
         }
       }
+
+      if (config.isTestDynamicInstrumentationEnabled) {
+        const testVisibilityDynamicInstrumentation = require('./ci-visibility/dynamic-instrumentation')
+        testVisibilityDynamicInstrumentation.start(config)
+      }
     } catch (e) {
-      log.error(e)
+      log.error('Error initialising tracer', e)
     }
 
     return this
@@ -186,7 +201,11 @@ class Tracer extends NoopProxy {
     try {
       return require('./profiler').start(config)
     } catch (e) {
-      log.error(e)
+      log.error(
+        'Error starting profiler. For troubleshooting tips, see ' +
+        '<https://dtdg.co/nodejs-profiler-troubleshooting>',
+        e
+      )
     }
   }
 
@@ -195,11 +214,15 @@ class Tracer extends NoopProxy {
       if (config.appsec.enabled) {
         this._modules.appsec.enable(config)
       }
+      if (config.llmobs.enabled) {
+        this._modules.llmobs.enable(config)
+      }
       if (!this._tracingInitialized) {
         const prioritySampler = appsecStandalone.configure(config)
         this._tracer = new DatadogTracer(config, prioritySampler)
         this.dataStreamsCheckpointer = this._tracer.dataStreamsCheckpointer
         this.appsec = new AppsecSdk(this._tracer, config)
+        this.llmobs = new LLMObsSDK(this._tracer, this._modules.llmobs, config)
         this._tracingInitialized = true
       }
       if (config.iast.enabled) {
@@ -208,6 +231,7 @@ class Tracer extends NoopProxy {
     } else if (this._tracingInitialized) {
       this._modules.appsec.disable()
       this._modules.iast.disable()
+      this._modules.llmobs.disable()
     }
 
     if (this._tracingInitialized) {

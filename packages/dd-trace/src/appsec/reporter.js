@@ -13,8 +13,9 @@ const {
   getRequestMetrics
 } = require('./telemetry')
 const zlib = require('zlib')
-const { MANUAL_KEEP } = require('../../../../ext/tags')
 const standalone = require('./standalone')
+const { SAMPLING_MECHANISM_APPSEC } = require('../constants')
+const { keepTrace } = require('../priority_sampler')
 
 // default limiter, configurable with setRateLimit()
 let limiter = new Limiter(100)
@@ -31,6 +32,7 @@ const contentHeaderList = [
 
 const EVENT_HEADERS_MAP = mapHeaderAndTags([
   ...ipHeaderList,
+  'x-forwarded',
   'forwarded',
   'via',
   ...contentHeaderList,
@@ -96,28 +98,26 @@ function reportWafInit (wafVersion, rulesVersion, diagnosticsRules = {}) {
     metricsQueue.set('_dd.appsec.event_rules.errors', JSON.stringify(diagnosticsRules.errors))
   }
 
-  metricsQueue.set(MANUAL_KEEP, 'true')
-
   incrementWafInitMetric(wafVersion, rulesVersion)
 }
 
-function reportMetrics (metrics, raspRuleType) {
-  const store = storage.getStore()
+function reportMetrics (metrics, raspRule) {
+  const store = storage('legacy').getStore()
   const rootSpan = store?.req && web.root(store.req)
   if (!rootSpan) return
 
   if (metrics.rulesVersion) {
     rootSpan.setTag('_dd.appsec.event_rules.version', metrics.rulesVersion)
   }
-  if (raspRuleType) {
-    updateRaspRequestsMetricTags(metrics, store.req, raspRuleType)
+  if (raspRule) {
+    updateRaspRequestsMetricTags(metrics, store.req, raspRule)
   } else {
     updateWafRequestsMetricTags(metrics, store.req)
   }
 }
 
 function reportAttack (attackData) {
-  const store = storage.getStore()
+  const store = storage('legacy').getStore()
   const req = store?.req
   const rootSpan = web.root(req)
   if (!rootSpan) return
@@ -129,7 +129,7 @@ function reportAttack (attackData) {
   }
 
   if (limiter.isAllowed()) {
-    newTags[MANUAL_KEEP] = 'true'
+    keepTrace(rootSpan, SAMPLING_MECHANISM_APPSEC)
 
     standalone.sample(rootSpan)
   }
@@ -148,7 +148,9 @@ function reportAttack (attackData) {
     newTags['_dd.appsec.json'] = '{"triggers":' + attackData + '}'
   }
 
-  newTags['network.client.ip'] = req.socket.remoteAddress
+  if (req.socket) {
+    newTags['network.client.ip'] = req.socket.remoteAddress
+  }
 
   rootSpan.addTags(newTags)
 }
@@ -160,7 +162,7 @@ function isFingerprintDerivative (derivative) {
 function reportDerivatives (derivatives) {
   if (!derivatives) return
 
-  const req = storage.getStore()?.req
+  const req = storage('legacy').getStore()?.req
   const rootSpan = web.root(req)
 
   if (!rootSpan) return
@@ -183,6 +185,8 @@ function finishRequest (req, res) {
 
   if (metricsQueue.size) {
     rootSpan.addTags(Object.fromEntries(metricsQueue))
+
+    keepTrace(rootSpan, SAMPLING_MECHANISM_APPSEC)
 
     standalone.sample(rootSpan)
 

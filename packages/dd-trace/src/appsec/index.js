@@ -6,16 +6,19 @@ const remoteConfig = require('./remote_config')
 const {
   bodyParser,
   cookieParser,
+  multerParser,
   incomingHttpRequestStart,
   incomingHttpRequestEnd,
   passportVerify,
+  passportUser,
   queryParser,
   nextBodyParsed,
   nextQueryParsed,
   expressProcessParams,
   responseBody,
   responseWriteHead,
-  responseSetHeader
+  responseSetHeader,
+  routerParam
 } = require('./channels')
 const waf = require('./waf')
 const addresses = require('./addresses')
@@ -26,7 +29,7 @@ const web = require('../plugins/util/web')
 const { extractIp } = require('../plugins/util/ip_extractor')
 const { HTTP_CLIENT_IP } = require('../../../../ext/tags')
 const { isBlocked, block, setTemplates, getBlockingAction } = require('./blocking')
-const { passportTrackEvent } = require('./passport')
+const UserTracking = require('./user_tracking')
 const { storage } = require('../../../datadog-core')
 const graphql = require('./graphql')
 const rasp = require('./rasp')
@@ -57,27 +60,28 @@ function enable (_config) {
 
     apiSecuritySampler.configure(_config.appsec)
 
+    UserTracking.setCollectionMode(_config.appsec.eventTracking.mode, false)
+
     bodyParser.subscribe(onRequestBodyParsed)
+    multerParser.subscribe(onRequestBodyParsed)
     cookieParser.subscribe(onRequestCookieParser)
     incomingHttpRequestStart.subscribe(incomingHttpStartTranslator)
     incomingHttpRequestEnd.subscribe(incomingHttpEndTranslator)
+    passportVerify.subscribe(onPassportVerify) // possible optimization: only subscribe if collection mode is enabled
+    passportUser.subscribe(onPassportDeserializeUser)
     queryParser.subscribe(onRequestQueryParsed)
     nextBodyParsed.subscribe(onRequestBodyParsed)
     nextQueryParsed.subscribe(onRequestQueryParsed)
     expressProcessParams.subscribe(onRequestProcessParams)
+    routerParam.subscribe(onRequestProcessParams)
     responseBody.subscribe(onResponseBody)
     responseWriteHead.subscribe(onResponseWriteHead)
     responseSetHeader.subscribe(onResponseSetHeader)
 
-    if (_config.appsec.eventTracking.enabled) {
-      passportVerify.subscribe(onPassportVerify)
-    }
-
     isEnabled = true
     config = _config
   } catch (err) {
-    log.error('Unable to start AppSec')
-    log.error(err)
+    log.error('[ASM] Unable to start AppSec', err)
 
     disable()
   }
@@ -87,7 +91,7 @@ function onRequestBodyParsed ({ req, res, body, abortController }) {
   if (body === undefined || body === null) return
 
   if (!req) {
-    const store = storage.getStore()
+    const store = storage('legacy').getStore()
     req = store?.req
   }
 
@@ -143,10 +147,6 @@ function incomingHttpStartTranslator ({ req, res, abortController }) {
     persistent[addresses.HTTP_CLIENT_IP] = clientIp
   }
 
-  if (apiSecuritySampler.sampleRequest(req)) {
-    persistent[addresses.WAF_CONTEXT_PROCESSOR] = { 'extract-schema': true }
-  }
-
   const actions = waf.run({ persistent }, req)
 
   handleResults(actions, req, res, rootSpan, abortController)
@@ -166,8 +166,14 @@ function incomingHttpEndTranslator ({ req, res }) {
     persistent[addresses.HTTP_INCOMING_COOKIES] = req.cookies
   }
 
-  if (req.query !== null && typeof req.query === 'object') {
-    persistent[addresses.HTTP_INCOMING_QUERY] = req.query
+  // we need to keep this to support nextjs
+  const query = req.query
+  if (query !== null && typeof query === 'object') {
+    persistent[addresses.HTTP_INCOMING_QUERY] = query
+  }
+
+  if (apiSecuritySampler.sampleRequest(req, res, true)) {
+    persistent[addresses.WAF_CONTEXT_PROCESSOR] = { 'extract-schema': true }
   }
 
   if (Object.keys(persistent).length) {
@@ -179,23 +185,39 @@ function incomingHttpEndTranslator ({ req, res }) {
   Reporter.finishRequest(req, res)
 }
 
-function onPassportVerify ({ credentials, user }) {
-  const store = storage.getStore()
+function onPassportVerify ({ framework, login, user, success, abortController }) {
+  const store = storage('legacy').getStore()
   const rootSpan = store?.req && web.root(store.req)
 
   if (!rootSpan) {
-    log.warn('No rootSpan found in onPassportVerify')
+    log.warn('[ASM] No rootSpan found in onPassportVerify')
     return
   }
 
-  passportTrackEvent(credentials, user, rootSpan, config.appsec.eventTracking.mode)
+  const results = UserTracking.trackLogin(framework, login, user, success, rootSpan)
+
+  handleResults(results, store.req, store.req.res, rootSpan, abortController)
+}
+
+function onPassportDeserializeUser ({ user, abortController }) {
+  const store = storage('legacy').getStore()
+  const rootSpan = store?.req && web.root(store.req)
+
+  if (!rootSpan) {
+    log.warn('[ASM] No rootSpan found in onPassportDeserializeUser')
+    return
+  }
+
+  const results = UserTracking.trackUser(user, rootSpan)
+
+  handleResults(results, store.req, store.req.res, rootSpan, abortController)
 }
 
 function onRequestQueryParsed ({ req, res, query, abortController }) {
   if (!query || typeof query !== 'object') return
 
   if (!req) {
-    const store = storage.getStore()
+    const store = storage('legacy').getStore()
     req = store?.req
   }
 
@@ -226,9 +248,9 @@ function onRequestProcessParams ({ req, res, abortController, params }) {
   handleResults(results, req, res, rootSpan, abortController)
 }
 
-function onResponseBody ({ req, body }) {
+function onResponseBody ({ req, res, body }) {
   if (!body || typeof body !== 'object') return
-  if (!apiSecuritySampler.isSampled(req)) return
+  if (!apiSecuritySampler.sampleRequest(req, res)) return
 
   // we don't support blocking at this point, so no results needed
   waf.run({
@@ -299,14 +321,17 @@ function disable () {
 
   // Channel#unsubscribe() is undefined for non active channels
   if (bodyParser.hasSubscribers) bodyParser.unsubscribe(onRequestBodyParsed)
+  if (multerParser.hasSubscribers) multerParser.unsubscribe(onRequestBodyParsed)
   if (cookieParser.hasSubscribers) cookieParser.unsubscribe(onRequestCookieParser)
   if (incomingHttpRequestStart.hasSubscribers) incomingHttpRequestStart.unsubscribe(incomingHttpStartTranslator)
   if (incomingHttpRequestEnd.hasSubscribers) incomingHttpRequestEnd.unsubscribe(incomingHttpEndTranslator)
   if (passportVerify.hasSubscribers) passportVerify.unsubscribe(onPassportVerify)
+  if (passportUser.hasSubscribers) passportUser.unsubscribe(onPassportDeserializeUser)
   if (queryParser.hasSubscribers) queryParser.unsubscribe(onRequestQueryParsed)
   if (nextBodyParsed.hasSubscribers) nextBodyParsed.unsubscribe(onRequestBodyParsed)
   if (nextQueryParsed.hasSubscribers) nextQueryParsed.unsubscribe(onRequestQueryParsed)
   if (expressProcessParams.hasSubscribers) expressProcessParams.unsubscribe(onRequestProcessParams)
+  if (routerParam.hasSubscribers) routerParam.unsubscribe(onRequestProcessParams)
   if (responseBody.hasSubscribers) responseBody.unsubscribe(onResponseBody)
   if (responseWriteHead.hasSubscribers) responseWriteHead.unsubscribe(onResponseWriteHead)
   if (responseSetHeader.hasSubscribers) responseSetHeader.unsubscribe(onResponseSetHeader)

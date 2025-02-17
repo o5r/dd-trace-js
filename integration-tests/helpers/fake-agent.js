@@ -5,8 +5,7 @@ const EventEmitter = require('events')
 const http = require('http')
 const express = require('express')
 const bodyParser = require('body-parser')
-const msgpack = require('msgpack-lite')
-const codec = msgpack.createCodec({ int64: true })
+const msgpack = require('@msgpack/msgpack')
 const upload = require('multer')()
 
 module.exports = class FakeAgent extends EventEmitter {
@@ -188,6 +187,46 @@ module.exports = class FakeAgent extends EventEmitter {
 
     return resultPromise
   }
+
+  assertLlmObsPayloadReceived (fn, timeout, expectedMessageCount = 1, resolveAtFirstSuccess) {
+    timeout = timeout || 30000
+    let resultResolve
+    let resultReject
+    let msgCount = 0
+    const errors = []
+
+    const timeoutObj = setTimeout(() => {
+      const errorsMsg = errors.length === 0 ? '' : `, additionally:\n${errors.map(e => e.stack).join('\n')}\n===\n`
+      resultReject(new Error(`timeout${errorsMsg}`, { cause: { errors } }))
+    }, timeout)
+
+    const resultPromise = new Promise((resolve, reject) => {
+      resultResolve = () => {
+        clearTimeout(timeoutObj)
+        resolve()
+      }
+      resultReject = (e) => {
+        clearTimeout(timeoutObj)
+        reject(e)
+      }
+    })
+
+    const messageHandler = msg => {
+      try {
+        msgCount += 1
+        fn(msg)
+        if (resolveAtFirstSuccess || msgCount === expectedMessageCount) {
+          resultResolve()
+          this.removeListener('llmobs', messageHandler)
+        }
+      } catch (e) {
+        errors.push(e)
+      }
+    }
+    this.on('llmobs', messageHandler)
+
+    return resultPromise
+  }
 }
 
 function buildExpressServer (agent) {
@@ -201,7 +240,7 @@ function buildExpressServer (agent) {
     res.status(200).send({ rate_by_service: { 'service:,env:': 1 } })
     agent.emit('message', {
       headers: req.headers,
-      payload: msgpack.decode(req.body, { codec })
+      payload: msgpack.decode(req.body, { useBigInt64: true })
     })
   })
 
@@ -286,6 +325,7 @@ function buildExpressServer (agent) {
     res.status(200).send()
     agent.emit('debugger-input', {
       headers: req.headers,
+      query: req.query,
       payload: req.body
     })
   })
@@ -312,6 +352,22 @@ function buildExpressServer (agent) {
     agent.emit('telemetry', {
       headers: req.headers,
       payload: req.body
+    })
+  })
+
+  app.post('/evp_proxy/v2/api/v2/llmobs', (req, res) => {
+    res.status(200).send()
+    agent.emit('llmobs', {
+      headers: req.headers,
+      payload: req.body
+    })
+  })
+
+  // Ensure that any failure inside of Express isn't swallowed and returned as a 500, but instead crashes the test
+  app.use((err, req, res, next) => {
+    if (!err) next()
+    process.nextTick(() => {
+      throw err
     })
   })
 

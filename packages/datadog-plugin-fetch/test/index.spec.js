@@ -14,7 +14,9 @@ const HTTP_RESPONSE_HEADERS = tags.HTTP_RESPONSE_HEADERS
 const SERVICE_NAME = DD_MAJOR < 3 ? 'test-http-client' : 'test'
 const describe = globalThis.fetch ? globalThis.describe : globalThis.describe.skip
 
-describe('Plugin', () => {
+describe('Plugin', function () {
+  this.timeout(0)
+
   let express
   let fetch
   let appListener
@@ -336,13 +338,13 @@ describe('Plugin', () => {
               clearTimeout(timer)
             })
 
-          const store = storage.getStore()
+          const store = storage('legacy').getStore()
 
-          storage.enterWith({ noop: true })
+          storage('legacy').enterWith({ noop: true })
 
           fetch(`http://localhost:${port}/user`).catch(() => {})
 
-          storage.enterWith(store)
+          storage('legacy').enterWith(store)
         })
       })
     })

@@ -21,7 +21,7 @@ class HttpClientPlugin extends ClientPlugin {
 
   bindStart (message) {
     const { args, http = {} } = message
-    const store = storage.getStore()
+    const store = storage('legacy').getStore()
     const options = args.options
     const agent = options.agent || options._defaultAgent || http.globalAgent || {}
     const protocol = options.protocol || agent.protocol || 'http:'
@@ -58,7 +58,12 @@ class HttpClientPlugin extends ClientPlugin {
       span._spanContext._trace.record = false
     }
 
-    if (this.config.propagationFilter(uri)) {
+    if (this.shouldInjectTraceHeaders(options, uri)) {
+      // Clone the headers object in case an upstream lib has a reference to the original headers
+      // Implemented due to aws-sdk issue where request signing is broken if we mutate the headers
+      // Explained further in:
+      // https://github.com/open-telemetry/opentelemetry-js-contrib/issues/1609#issuecomment-1826167348
+      options.headers = Object.assign({}, options.headers)
       this.tracer.inject(span, HTTP_HEADERS, options.headers)
     }
 
@@ -69,6 +74,14 @@ class HttpClientPlugin extends ClientPlugin {
     message.currentStore = { ...store, span }
 
     return message.currentStore
+  }
+
+  shouldInjectTraceHeaders (options, uri) {
+    if (!this.config.propagationFilter(uri)) {
+      return false
+    }
+
+    return true
   }
 
   bindAsyncStart ({ parentStore }) {

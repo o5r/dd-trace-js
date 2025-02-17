@@ -276,7 +276,6 @@ describe('Plugin', () => {
                 channel.assertQueue('', {}, (err, ok) => {
                   if (err) return
                   channel.sendToQueue(ok.queue, Buffer.from('content'))
-                  // eslint-disable-next-line n/handle-callback-err
                   channel.consume(ok.queue, () => {}, {}, (err, ok) => {})
                 })
               },
@@ -306,8 +305,10 @@ describe('Plugin', () => {
         describe('when data streams monitoring is enabled', function () {
           this.timeout(10000)
 
-          const expectedProducerHash = '17191234428405871432'
-          const expectedConsumerHash = '18277095184718602853'
+          const expectedProducerHashWithTopic = '16804605750389532869'
+          const expectedProducerHashWithExchange = '2722596631431228032'
+
+          const expectedConsumerHash = '17529824252700998941'
 
           before(() => {
             tracer = require('../../dd-trace')
@@ -322,19 +323,25 @@ describe('Plugin', () => {
             return agent.close({ ritmReset: false })
           })
 
-          it('Should emit DSM stats to the agent when sending a message', done => {
+          it('Should emit DSM stats to the agent when sending a message on an unnamed exchange', done => {
             agent.expectPipelineStats(dsmStats => {
-              let statsPointsReceived = 0
+              let statsPointsReceived = []
               // we should have 1 dsm stats points
               dsmStats.forEach((timeStatsBucket) => {
                 if (timeStatsBucket && timeStatsBucket.Stats) {
                   timeStatsBucket.Stats.forEach((statsBuckets) => {
-                    statsPointsReceived += statsBuckets.Stats.length
+                    statsPointsReceived = statsPointsReceived.concat(statsBuckets.Stats)
                   })
                 }
               })
-              expect(statsPointsReceived).to.be.at.least(1)
-              expect(agent.dsmStatsExist(agent, expectedProducerHash)).to.equal(true)
+              expect(statsPointsReceived.length).to.be.at.least(1)
+              expect(statsPointsReceived[0].EdgeTags).to.deep.equal([
+                'direction:out',
+                'has_routing_key:true',
+                'topic:testDSM',
+                'type:rabbitmq'
+              ])
+              expect(agent.dsmStatsExist(agent, expectedProducerHashWithTopic)).to.equal(true)
             }, { timeoutMs: 10000 }).then(done, done)
 
             channel.assertQueue('testDSM', {}, (err, ok) => {
@@ -344,18 +351,48 @@ describe('Plugin', () => {
             })
           })
 
+          it('Should emit DSM stats to the agent when sending a message on an named exchange', done => {
+            agent.expectPipelineStats(dsmStats => {
+              let statsPointsReceived = []
+              // we should have 1 dsm stats points
+              dsmStats.forEach((timeStatsBucket) => {
+                if (timeStatsBucket && timeStatsBucket.Stats) {
+                  timeStatsBucket.Stats.forEach((statsBuckets) => {
+                    statsPointsReceived = statsPointsReceived.concat(statsBuckets.Stats)
+                  })
+                }
+              })
+              expect(statsPointsReceived.length).to.be.at.least(1)
+              expect(statsPointsReceived[0].EdgeTags).to.deep.equal([
+                'direction:out',
+                'exchange:namedExchange',
+                'has_routing_key:true',
+                'type:rabbitmq'
+              ])
+              expect(agent.dsmStatsExist(agent, expectedProducerHashWithExchange)).to.equal(true)
+            }, { timeoutMs: 10000 }).then(done, done)
+
+            channel.assertExchange('namedExchange', 'direct', {}, (err, ok) => {
+              if (err) return done(err)
+
+              channel.publish('namedExchange', 'anyOldRoutingKey', Buffer.from('DSM pathway test'))
+            })
+          })
+
           it('Should emit DSM stats to the agent when receiving a message', done => {
             agent.expectPipelineStats(dsmStats => {
-              let statsPointsReceived = 0
+              let statsPointsReceived = []
               // we should have 2 dsm stats points
               dsmStats.forEach((timeStatsBucket) => {
                 if (timeStatsBucket && timeStatsBucket.Stats) {
                   timeStatsBucket.Stats.forEach((statsBuckets) => {
-                    statsPointsReceived += statsBuckets.Stats.length
+                    statsPointsReceived = statsPointsReceived.concat(statsBuckets.Stats)
                   })
                 }
               })
-              expect(statsPointsReceived).to.be.at.least(1)
+              expect(statsPointsReceived.length).to.be.at.least(1)
+              expect(statsPointsReceived[0].EdgeTags).to.deep.equal(
+                ['direction:in', 'topic:testDSM', 'type:rabbitmq'])
               expect(agent.dsmStatsExist(agent, expectedConsumerHash)).to.equal(true)
             }, { timeoutMs: 10000 }).then(done, done)
 
@@ -363,6 +400,60 @@ describe('Plugin', () => {
               if (err) return done(err)
 
               channel.consume(ok.queue, () => {}, {}, (err, ok) => {
+                if (err) done(err)
+              })
+            })
+          })
+
+          it('Should emit DSM stats to the agent when sending another message', done => {
+            agent.expectPipelineStats(dsmStats => {
+              let statsPointsReceived = []
+              // we should have 1 dsm stats points
+              dsmStats.forEach((timeStatsBucket) => {
+                if (timeStatsBucket && timeStatsBucket.Stats) {
+                  timeStatsBucket.Stats.forEach((statsBuckets) => {
+                    statsPointsReceived = statsPointsReceived.concat(statsBuckets.Stats)
+                  })
+                }
+              })
+              expect(statsPointsReceived.length).to.be.at.least(1)
+              expect(statsPointsReceived[0].EdgeTags).to.deep.equal([
+                'direction:out',
+                'has_routing_key:true',
+                'topic:testDSM',
+                'type:rabbitmq'
+              ])
+              expect(agent.dsmStatsExist(agent, expectedProducerHashWithTopic)).to.equal(true)
+            }, { timeoutMs: 10000 }).then(done, done)
+
+            channel.assertQueue('testDSM', {}, (err, ok) => {
+              if (err) return done(err)
+
+              channel.sendToQueue(ok.queue, Buffer.from('DSM pathway test'))
+            })
+          })
+
+          it('Should emit DSM stats to the agent when receiving a message with get', done => {
+            agent.expectPipelineStats(dsmStats => {
+              let statsPointsReceived = []
+              // we should have 2 dsm stats points
+              dsmStats.forEach((timeStatsBucket) => {
+                if (timeStatsBucket && timeStatsBucket.Stats) {
+                  timeStatsBucket.Stats.forEach((statsBuckets) => {
+                    statsPointsReceived = statsPointsReceived.concat(statsBuckets.Stats)
+                  })
+                }
+              })
+              expect(statsPointsReceived.length).to.be.at.least(1)
+              expect(statsPointsReceived[0].EdgeTags).to.deep.equal(
+                ['direction:in', 'topic:testDSM', 'type:rabbitmq'])
+              expect(agent.dsmStatsExist(agent, expectedConsumerHash)).to.equal(true)
+            }, { timeoutMs: 10000 }).then(done, done)
+
+            channel.assertQueue('testDSM', {}, (err, ok) => {
+              if (err) return done(err)
+
+              channel.get(ok.queue, {}, (err, ok) => {
                 if (err) done(err)
               })
             })
@@ -383,7 +474,7 @@ describe('Plugin', () => {
                 }
 
                 expect(produceSpanMeta).to.include({
-                  'pathway.hash': expectedProducerHash
+                  'pathway.hash': expectedProducerHashWithTopic
                 })
               }, { timeoutMs: 10000 }).then(done, done)
             })

@@ -3,8 +3,8 @@
 const { addHook } = require('./helpers/instrument')
 const shimmer = require('../../datadog-shimmer')
 
-const tracingChannel = require('dc-polyfill').tracingChannel
-const ch = tracingChannel('apm:openai:request')
+const dc = require('dc-polyfill')
+const ch = dc.tracingChannel('apm:openai:request')
 
 const V4_PACKAGE_SHIMS = [
   {
@@ -97,6 +97,14 @@ const V4_PACKAGE_SHIMS = [
     targetClass: 'Translations',
     baseResource: 'audio.translations',
     methods: ['create']
+  },
+  {
+    file: 'resources/chat/completions/completions.js',
+    targetClass: 'Completions',
+    baseResource: 'chat.completions',
+    methods: ['create'],
+    streamedResponse: true,
+    versions: ['>=4.85.0']
   }
 ]
 
@@ -337,6 +345,8 @@ for (const shim of V4_PACKAGE_SHIMS) {
                 shimmer.unwrap(apiProm, 'parse')
               })
           })
+
+          ch.end.publish(ctx)
 
           return apiProm
         })
